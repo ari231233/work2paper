@@ -195,6 +195,6 @@ def run(dossier: Dossier, llm: LLMProvider) -> None
 3. 补 CI（pytest 全量）+ 更新 README 快速开始。
 4. 打 tag `v0.2.0`。
 
-## 6. 需要在本框先定的一件事
+## 6. 已定：HTTP 客户端 = httpx
 
-**HTTP 客户端已定为 httpx**（M1、M5 都用）。这是本项目首个第三方依赖——如果你坚持"零依赖"，改成标准库 `urllib` 即可，告诉开框的对话即可。
+**HTTP 客户端已定为 httpx**（M1、M5 都用），已加入 `pyproject.toml` 的 `dependencies`。这是本项目首个第三方依赖。后续若需新增依赖，先经本框确认许可。
