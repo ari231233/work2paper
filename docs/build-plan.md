@@ -208,6 +208,29 @@ def run(dossier: Dossier, llm: LLMProvider) -> None
 - **要点**：状态机 `UNDERSTAND→☑1→ABSTRACT→☑2→RETRIEVE⇄GENERATE→☑3→EVALUATE→☑4→PLAN→☑5→REFLECT`；检查点默认暂停等输入（`auto=True` 跳过）；回退有最大轮数；每状态迁移后 `dossier.snapshot()`；经验条目带 `confidence/support_count`。
 - **验收**：`python -m papermine analyze examples/sample-project` 端到端跑通（含检查点暂停/续跑），结束写出一条经验。
 
+### M8 — 进化机制落地（M7 升级）
+
+- **目标**：把 `architecture.md` §3 新版进化机制落到代码——经验从"记忆"升级为"策略"，加 effect / 生命周期 / 去领域化 / 混合注入。
+- **前置**：M7 已建（`experience.py` / `reflect.py` / `orchestrator.py` + 测试），本任务是对它们的**升级改造**（会动 M7 文件，见 delta）。
+- **产出**：改造 `papermine/experience.py` + `papermine/agents/reflect.py` + `papermine/orchestrator.py`（可新增 policy 注入辅助模块），同步更新 3 个测试文件。
+- **迁移 delta**（旧 → 新，对齐 §3.6）：
+  - `scope` → `source_domain` + `applicability`
+  - `trigger` → `applicability.preconditions`
+  - `insight` → `principle`（去领域化）
+  - `action` → `policy.target` + `policy.directive`（结构化）
+  - `support_count` 保留；`status` 增加 `degraded` / `retired`
+  - 新增 `effect`（F3 落点）
+- **要点**：
+  1. 经验条目 schema 按 §3.6 升级；去重键从 `scope+insight` 改为 `principle+applicability`
+  2. 检索（M1）从 scope 匹配改为 **applicability 门控**（不匹配不注入）
+  3. reflect 蒸馏时**去领域化**（生成 `principle`）+ 生成结构化 `policy`（target+directive）+ 填 `effect`
+  4. 运行时**混合注入**：把 `policy` 渲染成对应 Agent 的行为约束注入（结构决定位置，LLM 执行约束）
+  5. 生命周期 `candidate → active → degraded → retired`，由 `support_count` + `effect` 驱动
+- **验收**：
+  1. 更新后的 3 个单测通过 + 冒烟 `python -m papermine examples/sample-project` 不回归
+  2. 手动构造一条带 `policy` + `applicability` + `effect` 的经验，验证：applicability 不匹配时不注入、匹配时 policy 注入到对应 target 的 Agent
+  3. 交付自检清单 + 遗留问题三分流（按 §1）
+
 ---
 
 ## 5. 全部完成后的集成收尾（一个框或本框）
