@@ -79,56 +79,89 @@
 
 让系统**跨任务、跨项目积累经验**：一次分析结束后总结教训，影响未来所有分析任务。这是从"工具"变成"数据飞轮/护城河"的关键——每个用户/实验室的经验库是私有资产，别人拿不走。
 
+> 核心定位：**经验不只是"被检索的记忆"，更是"能改行为的策略"**。经验最终要落到四个行为环节——prompt / planning / search / evaluation。
+
 ### 3.2 三种记忆
 
 | 记忆类型 | 内容 | 用途 |
 |---|---|---|
-| 案例记忆 episodic | 完整历史运行（Dossier 快照 + 结果 + 人类决策） | 检索相似案例，做 few-shot 注入 |
-| 语义记忆 semantic | 跨案例提炼的模式/规则/教训 | 注入 prompt 指导原则、更新词典与打分权重 |
+| 案例记忆 episodic | 完整历史运行（Dossier 快照 + 结果 + 人类决策） | 检索相似案例，做 few-shot 参考 |
+| 语义记忆 semantic | 去领域化后的**抽象原则 + 行为策略**（principle + policy） | 运行时把策略渲染成对应 Agent 的行为约束 |
 | 校准记忆 calibration | 评估预测 vs 实际结果的统计 | 校准 ⑤ 的打分，纠正系统偏差 |
 
 ### 3.3 三条反馈通道（谁在教系统）
 
 - **F1 人类反馈（主）**：检查点的 accept / rework / note。已选定"暂停等确认"，天然免费、质量高。
 - **F2 过程信号（辅）**：回炉次数、收敛轮数、降级次数、检索命中率。
-- **F3 结果信号（后期）**：论文是否发表 / 被采纳 / 被拒。
+- **F3 结果信号（后期）**：论文是否发表 / 被采纳 / 被拒；**落点为经验条目的 `effect` 字段**（记录这条策略到底有没有提升）。
 
 ### 3.4 三种进化机制（"进化"具体发生在哪）
 
-- **M1 检索注入**：新任务开始时，按相似度（六元组/场景/任务）检索 top-k 历史案例，作为 few-shot 注入 ②③④⑤⑥ 的 prompt。
-- **M2 模式蒸馏**：定期（每 N 次运行或人工触发）由 ⑦ 把案例蒸馏成"指导原则"，写回 prompt 模板、关键词词典、打分权重。
-- **M3 评估校准**：用 F3 结果校准 ⑤，纠正系统性偏差（如持续高估 novelty）。
+- **M1 检索注入**：新任务开始时，按 `applicability`（而非相似度硬匹配）检索匹配的经验，运行时把结构化 `policy` 渲染成对应 Agent 的行为约束注入。
+- **M2 模式蒸馏**：定期（每 N 次运行或人工触发）由 ⑦ 把案例**去领域化**为 `principle`，并生成 `policy`（target + directive），写回对应 Agent 的 prompt / planning / search / evaluation。
+- **M3 评估校准**：用 F3 结果（`effect`）校准 ⑤，纠正系统性偏差（如持续高估 novelty）。
 
-### 3.5 三条护栏（防退化）
+### 3.5 经验生效方式（混合：结构化 policy + LLM 注入解释）
 
-1. **进化的是记忆 + 上下文，不是模型权重**：MVP 不做微调，避免模型崩溃、保持可解释可回溯。
-2. **提炼后写入，不堆砌**：⑦ 只输出"经验条目"，带置信度 + 验证次数，达到阈值才进语义记忆；坏经验可人工剔除、可回滚。
-3. **反馈主源是人类，不是 LLM 自评**：避免自偏好放大错误。
+不是二选一，而是两层配合：
+
+1. **结构化层（确定性）**：`policy.target` 决定改哪个 Agent 的哪个环节，`policy.directive` 是明确的约束文本——保证"经验一定会作用于正确的位置"。
+2. **LLM 层（灵活性）**：运行时把 `directive` 渲染成该 Agent 的**行为准则**注入其 prompt，由 LLM 在科研的开放空间里灵活执行——覆盖程序化 if-else 覆盖不了的探索性判断。
+
+即：**结构决定"在哪生效 + 约束是什么"，LLM 负责"在开放空间里执行这条约束"**。
 
 ### 3.6 经验条目 schema
 
 ```jsonc
 {
   "experience_id": "exp_001",
-  "type": "pattern",                       // pattern | example | calibration
-  "scope": "task:异常检测",                // global | domain:工业时序 | task:...
-  "trigger": "项目含工业时序 + 传感器数据 + LSTM",
-  "insight": "剩余寿命预测几乎总能抽象成可发表问题",
-  "action": "问题抽象时优先考虑 RUL 方向",
+  "source_domain": "推荐系统",                 // 从哪学的（来源域）
+  "applicability": {                          // 能在哪用（适用边界，防跨域污染）
+    "domains": ["*"],                         // "*" = 领域无关
+    "task_types": ["创新点评估"],
+    "preconditions": ["涉及业务指标 vs 科研创新的判断"]
+  },
+  "principle": "业务指标提升 ≠ 科研创新",       // 去领域化后的抽象原则（跨任务迁移的载体）
+  "policy": {                                  // 行为策略
+    "target": "evaluation",                    // prompt | planning | search | evaluation
+    "directive": "评估 novelty 前先检查：是否只是业务指标提升，而非机制性创新"
+  },
+  "effect": {                                  // 这条 policy 有没有真的提升（F3 落点）
+    "outcome": "positive",                     // positive | neutral | negative
+    "measured_by": "human_review",             // human_review | paper_outcome
+    "note": "应用后评估更聚焦机制性创新",
+    "updated_at": "..."
+  },
   "confidence": 0.8,
-  "support_count": 3,                      // 被几次验证才够格进语义记忆
+  "support_count": 3,                          // 验证次数（= validation count），驱动晋升/降级
+  "status": "active",                          // candidate | active | degraded | retired
   "source_runs": ["run_1", "run_2"],
   "created_at": "...", "updated_at": "..."
 }
 ```
 
-### 3.7 ⑦ 经验沉淀 Agent（Reflection / Consolidation）
+### 3.7 经验生命周期与防污染
+
+- 生命周期：`candidate → active → degraded → retired`。
+  - 晋升：`support_count ≥ 阈值` 且（人工确认 或 `effect.outcome = positive`）。
+  - 降级：`effect.outcome = negative` 累积 → `confidence` 下降、`status → degraded`。
+  - 退役：`status = retired` 后不参与 M1 注入，但保留审计。
+- **防污染（域隔离）**：注入前先判 `applicability` 是否覆盖当前任务，不匹配不注入；一次失败只影响它自己所属 `source_domain` / `principle` 的 `confidence`，**不全局污染**。
+
+### 3.8 三条护栏（防退化）
+
+1. **进化的是记忆 + 上下文，不是模型权重**：MVP 不做微调，避免模型崩溃、保持可解释可回溯。
+2. **提炼后写入，不堆砌**：⑦ 只输出带 `confidence` + `support_count` + `applicability` 的经验条目；坏经验可人工剔除、可回滚。
+3. **反馈主源是人类，不是 LLM 自评**：`effect` 由人工 review 或结果信号填写，不由 LLM 自评。
+
+### 3.9 ⑦ 经验沉淀 Agent（Reflection / Consolidation）
 
 - **职责**：每次分析结束后，把本次运行蒸馏成候选经验条目。
 - **输入**：Dossier 快照 + 人类决策记录 + F2 过程信号。
 - **输出**：`experience_entries[]`（status = candidate）。
+- **关键动作**：蒸馏时**去领域化**——把领域特例抽象成领域无关的 `principle`，并生成 `policy`（target + directive）。
 - **时机**：⑥ 结束后自动触发一次；也可人工触发。
-- **晋升门槛**：候选条目经人工确认或 `support_count >= 阈值` 后才进入语义记忆，参与 M1 检索注入。
+- **晋升门槛**：候选条目经人工确认或 `validation_count ≥ 阈值` 后进入 active，参与 M1 检索注入。
 
 ---
 
