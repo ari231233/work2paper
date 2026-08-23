@@ -10,5 +10,7 @@ from __future__ import annotations
 
 from . import understand
 from . import abstract
+from . import evaluate
+from . import plan
 
-__all__ = ["understand", "abstract"]
+__all__ = ["understand", "abstract", "evaluate", "plan"]
