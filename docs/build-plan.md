@@ -7,11 +7,13 @@
 
 ## 0. 怎么用这份文档
 
-1. 每个「模块任务卡」= 一个新聊天框的工作内容。
-2. 新聊天框开头，粘贴对应模块的任务卡，并让它先读：
-   - `docs/architecture.md`（§3 自进化层、§4 Dossier schema、§5 六 Agent、§7 LLM 接口）
-   - `docs/engineering.md`（版本/数据/记忆规范）
-3. 模块做完：跑冒烟测试 + `git commit`（Conventional Commits，描述中文）。
+背景与硬性规则已写在仓库根 `AGENTS.md`（DSH 会自动注入到本仓库的聊天），**开新框只需一句 + 任务卡**：
+
+> 实现 `docs/build-plan.md` 里的模块 **M_x**，动手前先读 §3 冻结接口契约与相关文档。
+>
+> （然后粘贴对应模块的任务卡）
+
+模块做完：跑冒烟测试 + `git commit`（Conventional Commits，描述中文）。
 
 ## 1. 协作总则（每个框都必须遵守）
 
