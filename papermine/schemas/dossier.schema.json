@@ -1,0 +1,148 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://papermine.dev/schemas/dossier.schema.json",
+  "title": "Dossier",
+  "version": 1,
+  "description": "研究档案 Dossier 的数据契约，与 docs/architecture.md §4 完全对齐。运行时数据文件内嵌 _schema / _schema_version，读取时沿 papermine/storage.py 的 SCHEMA_MIGRATIONS 迁移链自动升级。",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["meta", "assets", "problems", "literature", "ideas", "evaluations", "roadmap", "human_decisions"],
+  "properties": {
+    "meta": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["project_id", "version", "llm_backend", "prompt_versions"],
+      "properties": {
+        "project_id": { "type": "string" },
+        "version": { "type": "integer", "minimum": 1 },
+        "llm_backend": { "type": ["string", "null"] },
+        "prompt_versions": { "type": "object", "additionalProperties": { "type": "string" } }
+      }
+    },
+    "assets": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["facts", "narrative", "evidence"],
+      "properties": {
+        "facts": {
+          "type": "object",
+          "additionalProperties": true,
+          "required": ["tasks", "methods", "data", "scenarios", "metrics", "libraries", "modules"],
+          "properties": {
+            "tasks": { "type": "array", "items": { "type": "string" } },
+            "methods": { "type": "array", "items": { "type": "string" } },
+            "data": { "type": "array", "items": { "type": "string" } },
+            "scenarios": { "type": "array", "items": { "type": "string" } },
+            "metrics": { "type": "array", "items": { "type": "string" } },
+            "libraries": { "type": "array", "items": { "type": "string" } },
+            "modules": { "type": "array", "items": { "type": "string" } }
+          }
+        },
+        "narrative": { "type": "string" },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": true,
+            "required": ["source", "snippet"],
+            "properties": {
+              "source": { "type": "string" },
+              "snippet": { "type": "string" }
+            }
+          }
+        }
+      }
+    },
+    "problems": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": ["problem_id", "formulation", "motivation", "why_not_engineering", "evidence_refs"],
+        "properties": {
+          "problem_id": { "type": "string" },
+          "title": { "type": "string" },
+          "formulation": { "type": "string" },
+          "motivation": { "type": "string" },
+          "why_not_engineering": { "type": "string" },
+          "evidence_refs": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    },
+    "literature": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": ["query", "papers", "gap_note", "sources"],
+        "properties": {
+          "query": { "type": "string" },
+          "papers": { "type": "array", "items": { "type": "object" } },
+          "gap_note": { "type": "string" },
+          "sources": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    },
+    "ideas": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": ["idea_id", "claim", "novelty_hypothesis", "problem_ref", "literature_refs", "status"],
+        "properties": {
+          "idea_id": { "type": "string" },
+          "claim": { "type": "string" },
+          "novelty_hypothesis": { "type": "string" },
+          "problem_ref": { "type": "string" },
+          "literature_refs": { "type": "array", "items": { "type": "string" } },
+          "status": { "type": "string" }
+        }
+      }
+    },
+    "evaluations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": ["idea_ref", "novelty_score", "data_feasibility", "workload_hours", "venue_guess", "verdict", "evidence"],
+        "properties": {
+          "idea_ref": { "type": "string" },
+          "novelty_score": { "type": "number" },
+          "data_feasibility": { "type": "string" },
+          "workload_hours": { "type": "number" },
+          "venue_guess": { "type": "string" },
+          "verdict": { "type": "string", "enum": ["proceed", "rework", "drop"] },
+          "rework_reason": { "type": ["string", "null"] },
+          "evidence": { "type": "array", "items": { "type": "object" } }
+        }
+      }
+    },
+    "roadmap": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["selected_idea", "paper_type", "outline", "experiment_plan", "timeline", "missing_items"],
+      "properties": {
+        "selected_idea": { "type": ["string", "null"] },
+        "paper_type": { "type": "string" },
+        "outline": { "type": "array", "items": { "type": ["string", "object"] } },
+        "experiment_plan": { "type": "array", "items": { "type": ["string", "object"] } },
+        "timeline": { "type": "object" },
+        "missing_items": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "human_decisions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": ["checkpoint", "decision", "note", "ts"],
+        "properties": {
+          "checkpoint": { "type": "string" },
+          "decision": { "type": "string" },
+          "note": { "type": "string" },
+          "ts": { "type": "string" }
+        }
+      }
+    }
+  }
+}
