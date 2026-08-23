@@ -14,6 +14,8 @@
 
 > 🛠 代码版本、数据、Agent 记忆的管理规范见 [`docs/engineering.md`](docs/engineering.md)。
 
+> 🧩 多聊天框模块搭建的任务拆分与接口契约见 [`docs/build-plan.md`](docs/build-plan.md)。
+
 ## 核心链路
 
 ```
