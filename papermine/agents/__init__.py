@@ -12,5 +12,6 @@ from . import understand
 from . import abstract
 from . import evaluate
 from . import plan
+from . import reflect
 
-__all__ = ["understand", "abstract", "evaluate", "plan"]
+__all__ = ["understand", "abstract", "evaluate", "plan", "reflect"]
