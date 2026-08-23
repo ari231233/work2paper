@@ -8,6 +8,15 @@ version = "0.1.0"
 description = "从横向项目工作中挖掘候选论文点的本地工具"
 readme = "README.md"
 requires-python = ">=3.8"
+license = { text = "MIT" }
+authors = [{ name = "papermine contributors" }]
+keywords = ["research", "paper", "academic", "mining", "llm", "agent"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Intended Audience :: Science/Research",
+]
 
 [project.scripts]
 papermine = "papermine.cli:main"

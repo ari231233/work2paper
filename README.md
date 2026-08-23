@@ -6,6 +6,10 @@
 
 > 定位：只做「看见 + 评估」，**不代写正文**。这是学术诚信红线，也是产品边界。
 
+> ⚖️ **学术诚信声明**：本工具是「选题 / 研究助理」，只产出候选点、评估与路线图，**不代写论文正文**；所有产出需人工核验与改写。
+
+> 🔒 **隐私承诺**：确定性分析在本地完成；接入 LLM 后，仅将**脱敏后的结构化事实**发送给你配置的 LLM 服务，不发送完整源码与原始数据；可切换本地模型实现完全离线。
+
 > 📐 目标形态是「项目理解 → 问题抽象 → 知识检索 → 创新点生成 → 可行性评估 → 论文路线规划」的 6-Agent 闭环系统，详见 [`docs/architecture.md`](docs/architecture.md)。
 
 > 🛠 代码版本、数据、Agent 记忆的管理规范见 [`docs/engineering.md`](docs/engineering.md)。
@@ -71,3 +75,12 @@ examples/sample-project/   示例横向项目（工业预测性维护）
 - 关键词 + 规则驱动，抽取粒度较粗，适合跑通链路、验证价值。
 - 代码静态分析目前只覆盖 Python；docx/pptx/pdf 仅识别为文档资产、不做内容解析。
 - 单个项目即可运行；跨项目共性挖掘是下一阶段重点。
+
+## 开源与贡献
+
+- 许可证：[MIT](LICENSE)
+- 变更记录：[CHANGELOG.md](CHANGELOG.md)
+- 贡献指南：[CONTRIBUTING.md](CONTRIBUTING.md)
+- 行为准则：[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)
+
+欢迎提 Issue 与 Pull Request，详见[贡献指南](CONTRIBUTING.md)。
