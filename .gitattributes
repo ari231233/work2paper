@@ -1,0 +1,9 @@
+# 统一换行符：文本自动转换，代码/文档强制 LF
+* text=auto
+*.py text eol=lf
+*.md text eol=lf
+*.json text eol=lf
+*.jsonl text eol=lf
+*.toml text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
