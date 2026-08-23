@@ -11,6 +11,7 @@
 ## 硬性规则
 
 - 严格遵守 `docs/build-plan.md` §3 的**冻结接口契约**，不得私自改函数签名 / schema
+- 改动会跨模块波及的内容（§3/§4 schema、接口契约、字段名）前，先 `git status && git log --oneline -10` 确认已建模块状态；若已有模块依赖它，先标记"需协作类迁移"再改文档
 - 只改自己模块的文件，不碰其他模块的实现
 - Python 3.8 兼容，模块头加 `from __future__ import annotations`
 - 交付前跑 `python -m papermine examples/sample-project` 冒烟测试，不得回归
