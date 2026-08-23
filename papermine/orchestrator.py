@@ -10,9 +10,11 @@
 - **检查点默认暂停等输入**（accept / rework / note；``auto=True`` 跳过并默认 accept）；
 - **回退有最大轮数**（``MAX_ROLLBACK_ROUNDS``），超限降级为前进；
 - **每状态迁移后 ``dossier.snapshot()``**（append-only 历史，可回滚）；
-- ⑦ 在 DONE 前执行一次，把本次运行蒸馏成经验条目写入经验库。
+- ⑦ 在 DONE 前执行一次，把本次运行蒸馏成经验条目写入经验库；
+- **M8 混合注入**：每个状态执行前按 applicability 门控检索 active 经验，把命中条目里的
+  ``policy.directive`` 渲染成该状态对应 Agent 的行为准则注入其 system prompt（结构决定位置，LLM 执行约束）。
 
-冻结接口（docs/build-plan.md §4 M7）：
+冻结接口（docs/build-plan.md §4 M7，M8 增量见同节 M8）：
 
     def run_pipeline(project_dir: str, auto: bool = False) -> str   # 返回 run_id
 
@@ -24,9 +26,9 @@ import os
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
-from . import experience, storage
+from . import experience, policy, storage
 from .agents import abstract, evaluate, ideate, plan, reflect, understand
 from .dossier import Dossier
 from .llm import NullProvider, get_provider
@@ -217,7 +219,23 @@ def _process_signals(state: Dict[str, Any]) -> Dict[str, Any]:
 # 状态机执行
 # ---------------------------------------------------------------------------
 
+def _injected_llm(llm: Any, dossier: Dossier, state: str) -> Any:
+    """按当前状态检索并注入 policy directive（M8 混合注入）。
+
+    - ``policy.retrieve_for_state``：applicability 门控 + target 过滤；
+    - ``policy.inject``：把 directive 包一层 LLM 包装器，追加到 system prompt。
+    无命中时原样返回 llm（零成本透传）。
+    """
+    entries = policy.retrieve_for_state(dossier, state)
+    grouped = policy.group_by_target(entries)
+    directives: List[str] = []
+    for target in policy.targets_for_state(state):
+        directives.extend(grouped.get(target, []))
+    return policy.inject(llm, directives)
+
+
 def _run_state(name: str, project_dir: str, dossier: Dossier, llm: Any) -> None:
+    llm = _injected_llm(llm, dossier, name)
     if name == "UNDERSTAND":
         understand.run(project_dir, dossier, llm)
     elif name == "ABSTRACT":

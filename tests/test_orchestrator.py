@@ -11,7 +11,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from papermine import experience, orchestrator, storage
+from papermine import experience, orchestrator, policy, storage
 from papermine.dossier import Dossier
 from papermine.llm import NullProvider
 
@@ -153,6 +153,113 @@ class AdvanceTest(unittest.TestCase):
         self.assertEqual(orchestrator._advance("cp1"), "ABSTRACT")
         self.assertEqual(orchestrator._advance("PLAN"), "cp5")
         self.assertEqual(orchestrator._advance("REFLECT"), "DONE")
+
+
+class _RecordingLLM:
+    """记录每次 complete 的 system 文本，返回空 dict 触发确定性降级。"""
+
+    def __init__(self):
+        self.systems = []
+
+    def complete(self, system, user, schema, temperature=0.2):
+        self.systems.append(system)
+        return {}
+
+
+class PolicyTest(unittest.TestCase):
+    def test_targets_for_state(self):
+        self.assertEqual(policy.targets_for_state("EVALUATE"), ["evaluation"])
+        self.assertEqual(policy.targets_for_state("PLAN"), ["planning"])
+        self.assertEqual(policy.targets_for_state("IDEATE"), ["search"])
+        self.assertEqual(sorted(policy.targets_for_state("UNDERSTAND")), ["prompt"])
+        self.assertEqual(policy.targets_for_state("REFLECT"), [])
+
+    def test_group_by_target_and_render(self):
+        grouped = policy.group_by_target([
+            {"policy": {"target": "evaluation", "directive": "D1"}},
+            {"policy": {"target": "evaluation", "directive": "D2"}},
+            {"policy": {"target": "planning", "directive": "D3"}},
+            {"policy": {"target": "evaluation", "directive": "D1"}},  # 重复去重
+        ])
+        self.assertEqual(grouped["evaluation"], ["D1", "D2"])
+        self.assertEqual(grouped["planning"], ["D3"])
+        self.assertIn("D1", policy.render_block(grouped["evaluation"]))
+
+    def test_inject_appends_to_system(self):
+        inner = _RecordingLLM()
+        wrapped = policy.inject(inner, ["约束X"])
+        wrapped.complete("系统提示", "用户", {}, 0.2)
+        self.assertEqual(len(inner.systems), 1)
+        self.assertIn("系统提示", inner.systems[0])
+        self.assertIn("约束X", inner.systems[0])
+
+    def test_inject_noop_without_directives(self):
+        inner = _RecordingLLM()
+        self.assertIs(policy.inject(inner, []), inner)
+
+
+class PolicyInjectionIntegrationTest(unittest.TestCase):
+    """验收 #2：applicability 不匹配时不注入、匹配时 policy 注入到对应 target 的 Agent。"""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self._orig = os.environ.get(storage.ENV_HOME)
+        os.environ[storage.ENV_HOME] = self._tmp.name
+        storage.ensure_layout()
+        self._retrieval_patch = mock.patch.object(
+            orchestrator.ideate, "search_literature", return_value=[])
+        self._retrieval_patch.start()
+
+    def tearDown(self) -> None:
+        self._retrieval_patch.stop()
+        if self._orig is None:
+            os.environ.pop(storage.ENV_HOME, None)
+        else:
+            os.environ[storage.ENV_HOME] = self._orig
+        self._tmp.cleanup()
+
+    def _seed(self, directive, target="evaluation", domains=("*",), task_types=("*",)):
+        experience.append_semantic({
+            "experience_id": "exp_inject",
+            "type": "pattern",
+            "source_domain": "*",
+            "applicability": {"domains": list(domains), "task_types": list(task_types),
+                              "preconditions": []},
+            "principle": "评估前先检查机制性创新",
+            "policy": {"target": target, "directive": directive},
+            "effect": {"outcome": "positive", "measured_by": "human_review",
+                       "note": "人工核验", "updated_at": None},
+            "confidence": 0.9,
+            "support_count": 2,
+            "status": "active",
+            "source_runs": ["seed"],
+        })
+
+    def test_policy_injected_to_matching_target(self):
+        probe = "【注入探针】评估 novelty 前先检查机制性创新"
+        self._seed(probe, target="evaluation")
+
+        rec = _RecordingLLM()
+        with mock.patch.object(orchestrator, "get_provider", return_value=rec):
+            orchestrator.run_pipeline(str(SAMPLE_PROJECT), auto=True)
+
+        eval_systems = [s for s in rec.systems if "可行性评估" in s]
+        plan_systems = [s for s in rec.systems if "路线规划" in s]
+        self.assertTrue(eval_systems, "应有评估 Agent 的 LLM 调用")
+        self.assertTrue(any(probe in s for s in eval_systems), "评估 Agent 应收到注入 directive")
+        self.assertTrue(plan_systems, "应有路线规划 Agent 的 LLM 调用")
+        self.assertFalse(any(probe in s for s in plan_systems), "非 target Agent 不应收到注入")
+
+    def test_policy_not_injected_on_applicability_mismatch(self):
+        probe = "【注入探针】不匹配域不应注入"
+        # 领域/任务与 sample 项目不匹配（推荐系统域）
+        self._seed(probe, target="evaluation", domains=("推荐系统",), task_types=("推荐",))
+
+        rec = _RecordingLLM()
+        with mock.patch.object(orchestrator, "get_provider", return_value=rec):
+            orchestrator.run_pipeline(str(SAMPLE_PROJECT), auto=True)
+
+        self.assertFalse(any(probe in s for s in rec.systems), "applicability 不匹配不应注入")
 
 
 if __name__ == "__main__":
