@@ -1,0 +1,29 @@
+# 密钥与本地配置
+.env
+
+# 运行时数据（用户级，实际在 ~/.papermine/，这里兜底误入仓库的情况）
+.papermine/
+
+# 生成产物
+report.md
+report.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+
+# IDE / 编辑器
+.idea/
+.vscode/
+*.swp
+
+# 系统
+.DS_Store
+Thumbs.db
