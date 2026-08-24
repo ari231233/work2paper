@@ -17,10 +17,15 @@ from papermine.llm import LLMError, NullProvider
 from papermine.retrieval import (
     GAP_SCHEMA,
     QUERY_REWRITE_SCHEMA,
+    RELEVANCE_SCHEMA,
     _arxiv_search,
     _dedup_papers,
     _default_gap_note,
+    _extract_keywords,
+    _filter_relevant,
+    _keyword_relevance,
     _s2_search,
+    _translate_query,
     search_literature,
 )
 
@@ -92,8 +97,25 @@ class ParsingTest(unittest.TestCase):
         self.assertEqual(p["year"], 2023)
         self.assertEqual(p["source"], "arxiv")
         self.assertEqual(p["external_id"], "2301.12345")
-        _, kwargs = m_http.return_value.get.call_args
-        self.assertIn("anomaly detection", kwargs["params"]["search_query"])
+        # M10：首个检索用 ti: 标题字段约束（不再 all:）
+        first = m_http.return_value.get.call_args_list[0].kwargs["params"]["search_query"]
+        self.assertIn("ti:anomaly", first)
+        self.assertIn("ti:detection", first)
+
+    def test_arxiv_field_query_builds_ti_constraint(self):
+        q = retrieval._arxiv_field_query("remaining useful life prediction for", "ti")
+        self.assertEqual(q, "ti:remaining AND ti:useful AND ti:life AND ti:prediction")
+
+    def test_arxiv_title_fallback_to_abs(self):
+        with mock.patch.object(retrieval, "_arxiv_fetch") as m_fetch:
+            m_fetch.side_effect = [[], [_paper("Abstract Hit", "arxiv")]]
+            papers = _arxiv_search("rare term query")
+        self.assertEqual(len(papers), 1)
+        self.assertEqual(papers[0]["title"], "Abstract Hit")
+        calls = m_fetch.call_args_list
+        self.assertEqual(len(calls), 2)
+        self.assertIn("ti:", calls[0].args[0])
+        self.assertIn("abs:", calls[1].args[0])
 
     def test_s2_search_parses_json(self):
         data = {"data": [{
@@ -206,6 +228,10 @@ class SearchLiteratureTest(unittest.TestCase):
                 if state["rewrites"] == 1:
                     return {"rewrite": "better query", "stop": False}
                 return {"rewrite": "", "stop": True}
+            if schema is RELEVANCE_SCHEMA:
+                # 相关性过滤器：把两轮检索合并到的论文都判为相关，验证改写循环合并不丢结果
+                papers = json.loads(user).get("papers", [])
+                return {"relevant_titles": [p["title"] for p in papers]}
             if schema is GAP_SCHEMA:
                 return {"gap_note": "存在缺口"}
             return {}
@@ -249,6 +275,56 @@ class SearchLiteratureTest(unittest.TestCase):
              mock.patch.object(retrieval, "_s2_search", return_value=[]):
             entries = search_literature(["q", "q", " q "], self.cache_dir, NullProvider())
         self.assertEqual(len(entries), 1)
+
+
+class TranslateTest(unittest.TestCase):
+    def test_translate_query_produces_focused_keywords(self):
+        llm = _StubLLM(handler=lambda s, u, schema, t: {
+            "english_query": "remaining useful life prediction sensor time series",
+            "keywords": ["remaining useful life", "prognostics"],
+        })
+        en, kws = _translate_query(llm, "设备剩余寿命预测")
+        self.assertEqual(en, "remaining useful life prediction sensor time series")
+        self.assertEqual(kws, ["remaining useful life", "prognostics"])
+
+    def test_translate_query_no_chinese_skips_llm(self):
+        llm = _StubLLM(handler=lambda s, u, schema, t: {"english_query": "X", "keywords": []})
+        en, kws = _translate_query(llm, "anomaly detection")
+        self.assertEqual(en, "anomaly detection")
+        self.assertEqual(kws, ["anomaly", "detection"])
+        self.assertEqual(llm.calls, [])  # 无中文 -> 不调用 LLM，直接确定性拆词
+
+
+class RelevanceFilterTest(unittest.TestCase):
+    def test_filter_relevant_llm_drops_irrelevant(self):
+        papers = [
+            _paper("Remaining Useful Life Prediction via LSTM"),
+            _paper("The LIFE Space Mission for Exoplanets"),
+        ]
+        llm = _StubLLM(handler=lambda s, u, schema, t: {
+            "relevant_titles": ["Remaining Useful Life Prediction via LSTM"],
+        })
+        out = _filter_relevant(llm, "remaining useful life prediction", [], papers)
+        self.assertEqual([p["title"] for p in out],
+                         ["Remaining Useful Life Prediction via LSTM"])
+
+    def test_filter_relevant_keyword_drops_irrelevant(self):
+        papers = [
+            _paper("Remaining Useful Life Prediction via LSTM"),
+            _paper("The LIFE Space Mission for Exoplanets"),
+        ]
+        out = _filter_relevant(NullProvider(), "remaining useful life prediction", [], papers)
+        self.assertEqual([p["title"] for p in out],
+                         ["Remaining Useful Life Prediction via LSTM"])
+
+    def test_keyword_relevance_multi_term_cooccurrence(self):
+        papers = [_paper("LIFE telescope survey"), _paper("Remaining Useful Life Estimation")]
+        kept = _keyword_relevance("remaining useful life", [], papers)
+        self.assertEqual(kept, ["Remaining Useful Life Estimation"])
+
+    def test_extract_keywords_drops_stopwords(self):
+        self.assertEqual(_extract_keywords("how to improve the RUL prediction for"),
+                         ["improve", "rul", "prediction"])
 
 
 class UtilTest(unittest.TestCase):
