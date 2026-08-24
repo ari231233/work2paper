@@ -287,24 +287,7 @@ def run(dossier: Dossier, llm: LLMProvider) -> None
   1. 单测通过 + 冒烟不回归；
   2. 对 sample 项目评估，5 个维度分**不全相等**，报告能看到分维度明细。
 
----
-
-## 5. 全部完成后的集成收尾（一个框或本框）
-
-1. CLI 新增 `analyze` 子命令（调 `orchestrator.run_pipeline`）+ `resume`/`status`。
-2. 复用 `report.py` 渲染最终 Markdown 报告（含六元组 + 候选点 + 路线图）。
-3. 补 CI（pytest 全量）+ 更新 README 快速开始。
-4. 打 tag `v0.2.0`。
-
-## 6. 已定：HTTP 客户端 = httpx
-
-**HTTP 客户端已定为 httpx**（M1、M5 都用），已加入 `pyproject.toml` 的 `dependencies`。这是本项目首个第三方依赖。后续若需新增依赖，先经本框确认许可。
-
----
-
-## 7. 下一阶段路线图（按科研价值排序）
-
-### 第一优先级：实验执行闭环（M12 — Controlled Experiment Loop）
+### M12 — Controlled Experiment Loop（实验执行闭环）
 
 **背景**：当前闭环停留在「科研规划」（understand → abstract → retrieve → generate → evaluate → plan → reflect），缺少真实实验验证。目标是增加一个**受控实验执行闭环**：
 
@@ -410,13 +393,15 @@ def run_experiment(benchmark, command, timeout=3600) -> dict
 
 **不实现开放式科研自动修改。** 当前目标：建立一个可靠、可复现、可验证的实验反馈闭环。未来再扩展 Experiment Agent / Code Agent / Autonomous Research Loop（真正 AutoResearch）。
 
-### 第二优先级：增强 idea 生成
+---
 
-- **literature contradiction graph**（文献矛盾图）：多篇论文在同一结论点冲突 → 最强的 research gap 信号。
-- **hypothesis generation**（假设生成）：把「claim」升级为可证伪的假设（if-then）。
+## 5. 全部完成后的集成收尾（一个框或本框）
 
-### 第三优先级：经验库升级（memory → policy → optimizer）
+1. CLI 新增 `analyze` 子命令（调 `orchestrator.run_pipeline`）+ `resume`/`status`。
+2. 复用 `report.py` 渲染最终 Markdown 报告（含六元组 + 候选点 + 路线图）。
+3. 补 CI（pytest 全量）+ 更新 README 快速开始。
+4. 打 tag `v0.2.0`。
 
-- 延续 M8 方向：`memory（存储）→ policy（策略）→ optimizer（自动优化策略/权重）`。
-- 终极形态：**科研领域的 skill learning**——系统学会可复用的「研究技能」。
-- 依赖前两个闭环产生真实「结果信号」作为 ground truth，故排最后。
+## 6. 已定：HTTP 客户端 = httpx
+
+**HTTP 客户端已定为 httpx**（M1、M5 都用），已加入 `pyproject.toml` 的 `dependencies`。这是本项目首个第三方依赖。后续若需新增依赖，先经本框确认许可。
