@@ -290,6 +290,7 @@ def run(dossier: Dossier, llm: LLMProvider) -> None
 ### M12 — Evidence Validation Agent（证据验证）
 
 - **目标**：验证候选 idea 的 claim 是否有足够证据支撑，输出「证据强度 + 理由」，帮学生判断"这个点子站不站得住"。**不跑实验，只做证据审查**。
+- **流程位置**：⑤ 可行性评估（EVALUATE）内部，与 M11 的 novelty 评分并列，作为「证据强度」子审查；evidence=weak 时随 verdict 一起回炉到 ④ 细化 claim。
 - **input**：`idea`（claim + novelty_hypothesis + literature_refs）。
 - **output**：`evidence`（weak / medium / strong）+ `reason`（为什么弱、如何强化）。
 - **检查维度**（4 项，均为"证据审查"而非"实验执行"）：
