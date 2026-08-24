@@ -183,17 +183,28 @@ def run(dossier: Dossier, llm: LLMProvider) -> None
 - **要点**：检索走 arXiv + Semantic Scholar API（httpx）；带"查询改写循环"（llm 改 query，最多 3 轮）；结果缓存到 `literature_cache/`；每个 idea 必须引用 `literature_refs` 并写 `novelty_hypothesis`。
 - **验收**：对 sample 项目能检索到真实论文 + 生成 ≥2 个带引用的 idea；网络不可用时优雅降级（literature 留空、idea 仍按规则生成）。
 
-- **v2 升级方向**（不新起模块，加深 M5 内部流水线）：
+### M5 v2 — 文献理解 + 矛盾挖掘 + 假设生成（M5 升级）
 
+- **目标**：把 M5 的「检索 → 创新」加深为六步流水线，让 idea 从「文献矛盾 / gap」里长出来，而非凭空组合。
+- **前置**：M5 已建（`retrieval.py` + `agents/ideate.py`），本任务升级 M5 内部。
+- **数据流**：
   ```
-  Problem → Literature Retrieval → Literature Understanding
-      → Contradiction / Gap Mining → Hypothesis Generation → Idea Generation
+  problems → Retrieval(已有) → literature
+           → Understanding(新) → literature 附结构化理解
+           → Contradiction/Gap Mining(新) → gap / contradiction_graph
+           → Hypothesis Generation(新) → hypotheses
+           → Idea Generation(已有) → ideas
   ```
-
-  其中 `Retrieval` 与 `Idea Generation` 已有，新增三步：
-  1. **Literature Understanding**：读懂论文 claim / 方法 / 结论 / 适用条件，形成结构化理解。
-  2. **Contradiction / Gap Mining**：构建文献矛盾图——多篇论文在同一结论点冲突 → 最强的 research gap 信号。
-  3. **Hypothesis Generation**：从 gap 生成可证伪假设（if-then），作为 idea 的前置。
+- **产出**：改造 `retrieval.py`（或新增 `literature.py`）+ `agents/ideate.py`（或新增 hypothesis 模块）+ 单测。
+- **要点**：
+  1. **Literature Understanding**：对每篇命中论文，LLM 提取结构化理解（claim / 方法 / 结论 / 适用条件 / 局限），存进 literature 条目。
+  2. **Contradiction / Gap Mining**：跨论文比较，找出「同一结论点结论冲突」（矛盾）或「无人覆盖的角度」（gap），产出 contradiction_graph。
+  3. **Hypothesis Generation**：从 gap 生成**可证伪假设**（if-then 形式），作为 idea 的前置。
+  4. **Idea Generation 复用假设**：每个 idea 必须引用其来源 gap / 矛盾（evidence 可追溯）。
+- **验收**：
+  1. 单测 + 冒烟不回归；
+  2. 对 sample 项目，能从文献挖出 ≥1 条矛盾或 gap，并据此生成假设 → idea；
+  3. idea 的证据里能看到来源 gap / 矛盾。
 
 ### M6 — ⑤ 可行性评估 + ⑥ 路线规划
 
@@ -245,15 +256,19 @@ def run(dossier: Dossier, llm: LLMProvider) -> None
   2. 手动构造一条带 `policy` + `applicability` + `effect` 的经验，验证：applicability 不匹配时不注入、匹配时 policy 注入到对应 target 的 Agent
   3. 交付自检清单 + 遗留问题三分流（按 §1）
 
-- **v2 升级方向**（memory → policy → optimizer）：
+### M8 v2 — Policy Optimizer（M8 升级）
 
-  | 升级方向 | 对应模块 | 改动 | 状态 |
-  |---|---|---|---|
-  | Memory → Policy | M7 Reflection + Experience | 经验抽象升级：从 `insight/action` → 结构化 `principle + policy` | ✅ 已做（M8） |
-  | Policy Injection | M7 Orchestrator | 运行时按场景匹配 policy，注入对应 Agent | ✅ 已做（M8 混合注入） |
-  | Policy Optimizer | M8 新增强化 | 根据 policy 使用效果，自动更新 confidence / 生命周期 / 优先级 | ⏳ 待做 |
-
-  最终形成：**科研领域的 skill learning**。
+- **目标**：让 policy 从「被动更新」（靠人工 review / 稀疏结果信号）升级为「自动优化」——根据 policy 使用情况 + 效果，自动更新 confidence / 生命周期 / 优先级。
+- **前置**：M8 已建（`experience.py` + `reflect.py` + `orchestrator.py`），本任务在 M8 基础上增强。
+- **产出**：改造 `experience.py`（或新增 optimizer 模块）+ 单测。
+- **要点**：
+  1. **记录使用**：policy 每次被注入某 Agent 时，记录 `usage`（注入次数 + 关联 run/idea）。
+  2. **效果信号**：复用现有 `effect`（人工 review / F3），并接入 M12 的 evidence 强度作为 idea 质量信号。
+  3. **自动更新**：按 usage + effect 自动调 confidence（升/降）、推进生命周期（active/degraded/retired）、调整检索注入优先级（排序）。
+  4. **防漂移**：更新设阈值门槛，避免单次信号剧烈波动（沿用 §3.7 生命周期护栏）。
+- **验收**：
+  1. 单测 + 冒烟不回归；
+  2. 构造一条 policy，模拟多次 positive/negative effect，验证 confidence 自动升/降、生命周期自动推进/降级、优先级随之变化。
 
 ### M9 — 报告渲染补文献段
 
