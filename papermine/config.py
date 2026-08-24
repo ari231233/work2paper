@@ -35,8 +35,34 @@ def load_env(path: Optional[Path] = None) -> Dict[str, str]:
     return values
 
 
+def get_proxy() -> str:
+    """读取代理地址：PAPERMINE_PROXY 优先（环境变量 > .env），其次 HTTPS_PROXY。
+
+    直连外网被干扰（SSL 握手被重置）时，在 .env 配
+    ``PAPERMINE_PROXY=http://127.0.0.1:7897`` 即可让 LLM / 检索走代理。空串 = 直连。
+    """
+    dotenv = load_env()
+    return (
+        os.environ.get("PAPERMINE_PROXY")
+        or dotenv.get("PAPERMINE_PROXY")
+        or os.environ.get("HTTPS_PROXY")
+        or dotenv.get("HTTPS_PROXY")
+        or ""
+    )
+
+
+def apply_proxy() -> None:
+    """把代理写入 os.environ，供 httpx（trust_env 默认开启）自动使用。"""
+    proxy = get_proxy()
+    if proxy:
+        os.environ["HTTP_PROXY"] = proxy
+        os.environ["HTTPS_PROXY"] = proxy
+        os.environ["ALL_PROXY"] = proxy
+
+
 def get_llm_config() -> Dict[str, str]:
     """读取 LLM 配置；优先环境变量，其次 .env，最后默认值。"""
+    apply_proxy()
     dotenv = load_env()
 
     def pick(key: str, default: str) -> str:

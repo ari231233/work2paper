@@ -28,6 +28,7 @@ from xml.etree import ElementTree
 
 import httpx
 
+from .config import apply_proxy
 from .llm import LLMError, LLMProvider, SchemaError
 
 __all__ = [
@@ -429,6 +430,7 @@ def search_literature(queries, cache_dir, llm) -> List[dict]:
     - 网络不可用时 papers 留空、gap_note 标离线，不抛异常；
     - ``llm`` 为 None 或 NullProvider 时跳过改写与 LLM gap，走确定性 gap_note。
     """
+    apply_proxy()
     entries: List[dict] = []
     for query in _dedup_strings(queries):
         papers, sources = _retrieve_with_rewrite(query, cache_dir, llm)
