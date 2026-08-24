@@ -233,6 +233,25 @@ def run(dossier: Dossier, llm: LLMProvider) -> None
   2. 手动构造一条带 `policy` + `applicability` + `effect` 的经验，验证：applicability 不匹配时不注入、匹配时 policy 注入到对应 target 的 Agent
   3. 交付自检清单 + 遗留问题三分流（按 §1）
 
+### M9 — 报告渲染补文献段
+
+- **目标**：`_render_report_md` 增加「文献检索结果」段，让文献验证在报告里可见（现在文献在 dossier 里但报告不展示）。
+- **依赖**：M7（`papermine/orchestrator.py` 的 `_render_report_md`）。
+- **产出**：修改 `_render_report_md`，新增 literature 段。
+- **要点**：每个 query 展示 query、命中论文（标题 + venue + 年份）、gap_note、来源；无文献时标"离线/无结果"。
+- **验收**：`report.md` 含「文献检索结果」段，能看到 papers 标题与 gap_note。
+
+### M10 — 检索相关性优化
+
+- **目标**：提高检索返回论文的相关性（当前英文 query 太泛，检回 *Byzantine SGD*、*dark energy* 等无关论文）。
+- **依赖**：M5（`papermine/retrieval.py`）。
+- **产出**：修改 `retrieval.py` 的翻译/检索/过滤逻辑。
+- **要点**：
+  1. 翻译产出更聚焦的学术关键词（核心术语组合，而非宽泛短语）；
+  2. arXiv 检索加字段约束（如 `ti:` 标题限定），减少词面误命中；
+  3. 检索后加相关性过滤（LLM 判相关 或 关键词匹配过滤）。
+- **验收**：对 sample 项目检索，返回论文无明显无关项（无 *Byzantine SGD* / *dark energy* 类）。
+
 ---
 
 ## 5. 全部完成后的集成收尾（一个框或本框）

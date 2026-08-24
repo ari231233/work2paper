@@ -60,6 +60,13 @@
 - **解决**：`DeepSeekProvider` 持有持久 `httpx.Client`；检索层加模块级 `_http()` 复用 Client（连接池 + keep-alive + TLS 复用）。
 - **教训**：频繁 HTTP 调用要复用连接池；改实现后单测的 mock 方式（patch `httpx.get` → patch 复用 client）需同步更新。
 
+### 2.4 检索相关性差（英文 query 太泛）
+
+- **现象**：检索返回了 *Byzantine-Resilient SGD*、*dark energy* 等完全无关的论文。
+- **根因**：翻译后的英文 query 太泛，arXiv 按词面命中（如 "life" 命中 "LIFE" 望远镜论文），缺乏相关性过滤。
+- **解决**：立项 M10——翻译产出更聚焦的关键词、检索加字段约束（`ti:`/`abs:`）、检索后做相关性过滤。
+- **教训**：外部检索 API 的"召回"不等于"相关"，要加相关性过滤/后校验。
+
 ---
 
 ## 三、设计与理解陷阱
@@ -90,6 +97,18 @@
   2. 生效方式用**混合**：结构化 policy 决定"在哪生效+约束是什么"，LLM 负责"在开放空间执行约束"。
   3. 生命周期 `candidate → active → degraded → retired`，由 `support_count + effect` 驱动。
   4. 跨任务积累 = 去领域化（principle）+ applicability 门控。
+
+### 3.5 LLM 评分趋同
+
+- **现象**：4 个创新点 novelty 全 3.5、工作量全 120，看起来像模板回复。
+- **根因**：并非模板（每个 idea 的 `novelty_reason` 其实不同），而是 LLM 评分粒度粗——结构相似的 idea 被给了同一个"中等"档整数分。
+- **教训**：LLM 打分有趋同/取整倾向；评估类任务要加"区分度约束"或强制排序。
+
+### 3.6 报告渲染缺文献段
+
+- **现象**：文献检索做了（dossier.json 里有 papers + gap_note），但 report.md 里看不到任何文献。
+- **根因**：`_render_report_md` 只渲染六段（叙事/问题/创新点/评估/路线图/决策），漏了 literature 段。
+- **教训**：**做了证据却不展示 = 白做**；报告渲染要覆盖所有关键证据源。
 
 ---
 
