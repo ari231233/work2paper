@@ -51,7 +51,7 @@ __all__ = [
 ]
 
 # ---- 常量 ----
-ARXIV_API = "http://export.arxiv.org/api/query"
+ARXIV_API = "https://export.arxiv.org/api/query"
 S2_API = "https://api.semanticscholar.org/graph/v1/paper/search"
 S2_FIELDS = "title,authors,abstract,year,externalIds,url,venue"
 
@@ -59,6 +59,10 @@ MAX_RESULTS = 5          # 每个源每轮最多取回论文数
 TIMEOUT = 20.0           # 单次 HTTP 超时（秒）
 MAX_ROUNDS = 3           # 查询改写循环最大轮数（含首轮原始查询）
 DEFAULT_TTL_SECONDS = 7 * 24 * 3600   # 文献缓存 TTL：7 天
+
+# Semantic Scholar 429 限流重试（公开 API 无 key 时易触发）
+S2_MAX_RETRIES = 2
+S2_RETRY_BACKOFF = 1.5
 
 # 缓存文件内嵌 schema 名 / 版本（区别于 dossier）
 CACHE_SCHEMA = "literature_cache"
@@ -85,6 +89,15 @@ GAP_SCHEMA: Dict[str, Any] = {
     "required": ["gap_note"],
     "properties": {
         "gap_note": {"type": "string"},
+    },
+}
+
+TRANSLATE_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["english_query"],
+    "properties": {
+        "english_query": {"type": "string"},
     },
 }
 
@@ -199,10 +212,18 @@ def _arxiv_search(query: str, max_results: int = MAX_RESULTS,
 
 def _s2_search(query: str, max_results: int = MAX_RESULTS,
                timeout: float = TIMEOUT) -> List[Dict[str, Any]]:
-    """Semantic Scholar Graph API 检索，返回标准化论文列表；网络/HTTP 错误向上抛。"""
+    """Semantic Scholar Graph API 检索，返回标准化论文列表；网络/HTTP 错误向上抛。
+
+    429（限流）时做有限次退避重试，仍失败则抛错由上层降级。
+    """
     params = {"query": query, "fields": S2_FIELDS, "limit": max_results}
-    resp = httpx.get(S2_API, params=params, timeout=timeout)
-    resp.raise_for_status()
+    for attempt in range(S2_MAX_RETRIES + 1):
+        resp = httpx.get(S2_API, params=params, timeout=timeout)
+        if resp.status_code == 429 and attempt < S2_MAX_RETRIES:
+            time.sleep(S2_RETRY_BACKOFF * (attempt + 1))
+            continue
+        resp.raise_for_status()
+        break
 
     data = resp.json()
     if not isinstance(data, dict):
@@ -355,11 +376,34 @@ def _llm_rewrite(llm: Optional[LLMProvider], query: str,
     return rewrite
 
 
+_TRANSLATE_SYSTEM = (
+    "你是 papermine 的「检索查询翻译器」。把给定的中文查询翻译成规范的英文学术检索关键词"
+    "（短语即可，不要完整句子，不要解释）。只输出 JSON，严格满足给定 schema。"
+)
+
+
+def _translate_query(llm: Optional[LLMProvider], query: str) -> str:
+    """把含中文的查询翻译成英文学术关键词；无中文 / 无 LLM / 失败时原样返回。"""
+    if llm is None:
+        return query
+    if not any("\u4e00" <= ch <= "\u9fff" for ch in query):
+        return query
+    user = json.dumps({"query": query}, ensure_ascii=False)
+    try:
+        result = llm.complete(_TRANSLATE_SYSTEM, user, TRANSLATE_SCHEMA, temperature=0.2)
+    except (LLMError, SchemaError):
+        return query
+    if not isinstance(result, dict):
+        return query
+    en = _clean_ws(result.get("english_query"))
+    return en if en else query
+
+
 def _retrieve_with_rewrite(query: str, cache_dir: Any, llm: Optional[LLMProvider]) -> tuple:
     """对一个查询跑查询改写循环（最多 MAX_ROUNDS 轮），合并去重各轮论文。"""
     merged: Dict[str, Dict[str, Any]] = {}
     sources: List[str] = []
-    current = query
+    current = _translate_query(llm, query)
     for round_no in range(1, MAX_ROUNDS + 1):
         papers, srcs = _search_once(current, cache_dir)
         for p in papers:
