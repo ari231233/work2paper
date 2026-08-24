@@ -245,6 +245,16 @@ def run(dossier: Dossier, llm: LLMProvider) -> None
   2. 手动构造一条带 `policy` + `applicability` + `effect` 的经验，验证：applicability 不匹配时不注入、匹配时 policy 注入到对应 target 的 Agent
   3. 交付自检清单 + 遗留问题三分流（按 §1）
 
+- **v2 升级方向**（memory → policy → optimizer）：
+
+  | 升级方向 | 对应模块 | 改动 | 状态 |
+  |---|---|---|---|
+  | Memory → Policy | M7 Reflection + Experience | 经验抽象升级：从 `insight/action` → 结构化 `principle + policy` | ✅ 已做（M8） |
+  | Policy Injection | M7 Orchestrator | 运行时按场景匹配 policy，注入对应 Agent | ✅ 已做（M8 混合注入） |
+  | Policy Optimizer | M8 新增强化 | 根据 policy 使用效果，自动更新 confidence / 生命周期 / 优先级 | ⏳ 待做 |
+
+  最终形成：**科研领域的 skill learning**。
+
 ### M9 — 报告渲染补文献段
 
 - **目标**：`_render_report_md` 增加「文献检索结果」段，让文献验证在报告里可见（现在文献在 dossier 里但报告不展示）。
