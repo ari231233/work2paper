@@ -299,3 +299,34 @@ def run(dossier: Dossier, llm: LLMProvider) -> None
 ## 6. 已定：HTTP 客户端 = httpx
 
 **HTTP 客户端已定为 httpx**（M1、M5 都用），已加入 `pyproject.toml` 的 `dependencies`。这是本项目首个第三方依赖。后续若需新增依赖，先经本框确认许可。
+
+---
+
+## 7. 下一阶段路线图（按科研价值排序）
+
+### 第一优先级：实验执行闭环（M12）
+
+### M12 — 实验执行 Agent（实验闭环）
+
+- **目标**：把「idea → 路线图」推进到「跑实验 → 拿结果」，形成 idea → 实验 → 结果 → 反馈 的闭环；否则只能生成论文 idea、出不了论文。
+- **input**：`roadmap`（selected_idea + experiment_plan + baseline + 指标）。
+- **output**：`experiment_log`（实验日志）、`result`（结果/指标）、`failure_reason`（失败原因）。
+- **依赖**：M6（roadmap 产出）+ 代码执行环境（沙箱）。
+- **要点**：
+  1. 从 roadmap 解析实验计划 → 生成可执行实验代码（baseline 复现 + 主实验 + 消融）；
+  2. 在沙箱中执行（Python + 数据 + 依赖），采集指标；
+  3. 失败时记录 `failure_reason`（环境 / 数据 / 代码 / baseline 原因）；
+  4. **反馈闭环**：`result` / `failure_reason` 回写 dossier，触发 idea / roadmap 修订或经验沉淀。
+- **硬约束**：实验需要真实可执行的数据 + 代码（当前 sample 项目是虚构的、跑不出真实实验）——需配套「带真实数据的最小可跑项目」作为实验场景。
+- **验收**：对配套的真实项目，从 roadmap 跑出一个 baseline 实验，产出 `experiment_log` + `result`（或 `failure_reason`）。
+
+### 第二优先级：增强 idea 生成
+
+- **literature contradiction graph**（文献矛盾图）：多篇论文在同一结论点冲突 → 最强的 research gap 信号。
+- **hypothesis generation**（假设生成）：把「claim」升级为可证伪的假设（if-then）。
+
+### 第三优先级：经验库升级（memory → policy → optimizer）
+
+- 延续 M8 方向：`memory（存储）→ policy（策略）→ optimizer（自动优化策略/权重）`。
+- 终极形态：**科研领域的 skill learning**——系统学会可复用的「研究技能」。
+- 依赖前两个闭环产生真实「结果信号」作为 ground truth，故排最后。
