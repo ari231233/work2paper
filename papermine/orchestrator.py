@@ -336,6 +336,45 @@ def _render_report_md(dossier: Dossier) -> str:
         lines.append("（无）")
     lines.append("")
 
+    lines.append("## 文献检索结果")
+    lines.append("")
+    if dossier.literature:
+        for lit in dossier.literature:
+            if not isinstance(lit, dict):
+                continue
+            query = (lit.get("query") or "").strip()
+            lines.append("- **query**：{}".format(query or "（未命名查询）"))
+            sources = lit.get("sources") or []
+            lines.append("  - 来源：{}".format(
+                "、".join(str(s) for s in sources) if sources else "未知"))
+            papers = lit.get("papers") or []
+            if papers:
+                for p in papers:
+                    if not isinstance(p, dict):
+                        continue
+                    title = (p.get("title") or "").strip()
+                    if not title:
+                        continue
+                    venue = (p.get("venue") or "").strip()
+                    year = p.get("year")
+                    meta = []
+                    if venue:
+                        meta.append(venue)
+                    if year is not None and str(year).strip():
+                        meta.append(str(year))
+                    if meta:
+                        lines.append("  - {}（{}）".format(title, "，".join(meta)))
+                    else:
+                        lines.append("  - {}".format(title))
+            else:
+                lines.append("  - 离线/无结果")
+            gap_note = (lit.get("gap_note") or "").strip()
+            if gap_note:
+                lines.append("  - gap_note：{}".format(gap_note))
+    else:
+        lines.append("（离线/无结果）")
+    lines.append("")
+
     lines.append("## 候选创新点")
     lines.append("")
     if dossier.ideas:

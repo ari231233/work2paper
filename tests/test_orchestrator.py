@@ -262,5 +262,54 @@ class PolicyInjectionIntegrationTest(unittest.TestCase):
         self.assertFalse(any(probe in s for s in rec.systems), "applicability 不匹配不应注入")
 
 
+class RenderReportLiteratureTest(unittest.TestCase):
+    """M9：报告渲染补文献段（dossier.literature → report.md「文献检索结果」段）。"""
+
+    def _dossier(self) -> Dossier:
+        d = Dossier()
+        d.meta["run_id"] = "run_test"
+        d.meta["llm_backend"] = "null"
+        return d
+
+    def test_render_literature_offline(self):
+        md = orchestrator._render_report_md(self._dossier())
+        self.assertIn("## 文献检索结果", md)
+        self.assertIn("（离线/无结果）", md)
+
+    def test_render_literature_with_results(self):
+        d = self._dossier()
+        d.literature = [{
+            "query": "稀疏表示 推荐系统",
+            "papers": [
+                {"title": "Deep Sparse Representation", "venue": "NeurIPS", "year": 2020,
+                 "authors": [], "url": "", "source": "arxiv", "external_id": "2001.00001"},
+                {"title": "Learning to Hash", "venue": "arXiv", "year": None,
+                 "authors": [], "url": "", "source": "semantic_scholar", "external_id": ""},
+            ],
+            "gap_note": "现有工作未覆盖跨模态稀疏表示。",
+            "sources": ["arxiv", "semantic_scholar"],
+        }]
+        md = orchestrator._render_report_md(d)
+        self.assertIn("## 文献检索结果", md)
+        self.assertIn("稀疏表示 推荐系统", md)
+        self.assertIn("Deep Sparse Representation（NeurIPS，2020）", md)
+        self.assertIn("Learning to Hash（arXiv）", md)
+        self.assertIn("gap_note：现有工作未覆盖跨模态稀疏表示。", md)
+        self.assertIn("来源：arxiv、semantic_scholar", md)
+
+    def test_render_literature_query_no_papers_marks_offline(self):
+        d = self._dossier()
+        d.literature = [{
+            "query": "某查询",
+            "papers": [],
+            "gap_note": "（离线/无结果）未检索到可用文献。",
+            "sources": [],
+        }]
+        md = orchestrator._render_report_md(d)
+        self.assertIn("## 文献检索结果", md)
+        self.assertIn("某查询", md)
+        self.assertIn("离线/无结果", md)
+
+
 if __name__ == "__main__":
     unittest.main()
