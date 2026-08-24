@@ -183,6 +183,18 @@ def run(dossier: Dossier, llm: LLMProvider) -> None
 - **要点**：检索走 arXiv + Semantic Scholar API（httpx）；带"查询改写循环"（llm 改 query，最多 3 轮）；结果缓存到 `literature_cache/`；每个 idea 必须引用 `literature_refs` 并写 `novelty_hypothesis`。
 - **验收**：对 sample 项目能检索到真实论文 + 生成 ≥2 个带引用的 idea；网络不可用时优雅降级（literature 留空、idea 仍按规则生成）。
 
+- **v2 升级方向**（不新起模块，加深 M5 内部流水线）：
+
+  ```
+  Problem → Literature Retrieval → Literature Understanding
+      → Contradiction / Gap Mining → Hypothesis Generation → Idea Generation
+  ```
+
+  其中 `Retrieval` 与 `Idea Generation` 已有，新增三步：
+  1. **Literature Understanding**：读懂论文 claim / 方法 / 结论 / 适用条件，形成结构化理解。
+  2. **Contradiction / Gap Mining**：构建文献矛盾图——多篇论文在同一结论点冲突 → 最强的 research gap 信号。
+  3. **Hypothesis Generation**：从 gap 生成可证伪假设（if-then），作为 idea 的前置。
+
 ### M6 — ⑤ 可行性评估 + ⑥ 路线规划
 
 - **目标**：`ideas` → `evaluations`（证据驱动）；`evaluations` → `roadmap`。
