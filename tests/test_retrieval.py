@@ -82,7 +82,8 @@ class _StubLLM:
 
 class ParsingTest(unittest.TestCase):
     def test_arxiv_search_parses_atom(self):
-        with mock.patch.object(retrieval.httpx, "get", return_value=_FakeResp(content=ARXIV_ATOM)) as m:
+        with mock.patch.object(retrieval, "_http") as m_http:
+            m_http.return_value.get.return_value = _FakeResp(content=ARXIV_ATOM)
             papers = _arxiv_search("anomaly detection")
         self.assertEqual(len(papers), 1)
         p = papers[0]
@@ -91,7 +92,7 @@ class ParsingTest(unittest.TestCase):
         self.assertEqual(p["year"], 2023)
         self.assertEqual(p["source"], "arxiv")
         self.assertEqual(p["external_id"], "2301.12345")
-        _, kwargs = m.call_args
+        _, kwargs = m_http.return_value.get.call_args
         self.assertIn("anomaly detection", kwargs["params"]["search_query"])
 
     def test_s2_search_parses_json(self):
@@ -104,7 +105,8 @@ class ParsingTest(unittest.TestCase):
             "url": "https://doi.org/10.1/x",
             "externalIds": {"ArXiv": "2201.00001", "DOI": "10.1/x"},
         }]}
-        with mock.patch.object(retrieval.httpx, "get", return_value=_FakeResp(json_data=data)):
+        with mock.patch.object(retrieval, "_http") as m_http:
+            m_http.return_value.get.return_value = _FakeResp(json_data=data)
             papers = _s2_search("RUL prediction")
         self.assertEqual(len(papers), 1)
         p = papers[0]
@@ -115,7 +117,8 @@ class ParsingTest(unittest.TestCase):
         self.assertEqual(p["venue"], "IEEE TII")
 
     def test_arxiv_search_http_error_raises(self):
-        with mock.patch.object(retrieval.httpx, "get", return_value=_FakeResp(status_code=500)):
+        with mock.patch.object(retrieval, "_http") as m_http:
+            m_http.return_value.get.return_value = _FakeResp(status_code=500)
             with self.assertRaises(httpx.HTTPError):
                 _arxiv_search("x")
 

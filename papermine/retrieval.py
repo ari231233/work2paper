@@ -64,6 +64,17 @@ DEFAULT_TTL_SECONDS = 7 * 24 * 3600   # 文献缓存 TTL：7 天
 S2_MAX_RETRIES = 2
 S2_RETRY_BACKOFF = 1.5
 
+# 复用长连接 Client（连接池 + keep-alive + TLS 复用），避免每次请求新建连接。
+_http_client: Optional[httpx.Client] = None
+
+
+def _http() -> httpx.Client:
+    """返回进程内复用的 httpx.Client；首次调用时创建（trust_env 读代理）。"""
+    global _http_client
+    if _http_client is None or _http_client.is_closed:
+        _http_client = httpx.Client(timeout=TIMEOUT, follow_redirects=True)
+    return _http_client
+
 # 缓存文件内嵌 schema 名 / 版本（区别于 dossier）
 CACHE_SCHEMA = "literature_cache"
 CACHE_SCHEMA_VERSION = 1
@@ -176,7 +187,7 @@ def _arxiv_search(query: str, max_results: int = MAX_RESULTS,
         "max_results": max_results,
         "sortBy": "relevance",
     }
-    resp = httpx.get(ARXIV_API, params=params, timeout=timeout)
+    resp = _http().get(ARXIV_API, params=params, timeout=timeout)
     resp.raise_for_status()
 
     try:
@@ -218,7 +229,7 @@ def _s2_search(query: str, max_results: int = MAX_RESULTS,
     """
     params = {"query": query, "fields": S2_FIELDS, "limit": max_results}
     for attempt in range(S2_MAX_RETRIES + 1):
-        resp = httpx.get(S2_API, params=params, timeout=timeout)
+        resp = _http().get(S2_API, params=params, timeout=timeout)
         if resp.status_code == 429 and attempt < S2_MAX_RETRIES:
             time.sleep(S2_RETRY_BACKOFF * (attempt + 1))
             continue

@@ -159,8 +159,8 @@ class DeepSeekProvider:
         self.model = model
         self.timeout = timeout
         self.max_retries = max_retries
-        # client 仅用于测试注入（httpx.MockTransport）；生产环境每次调用新建连接。
-        self._client = client
+        # 复用长连接 Client（连接池 + keep-alive + TLS 复用）；测试注入 MockTransport 时用之。
+        self._client = client if client is not None else httpx.Client(timeout=timeout)
 
     def complete(self, system: str, user: str,
                  schema: dict, temperature: float = 0.2) -> dict:
@@ -206,10 +206,7 @@ class DeepSeekProvider:
             "Content-Type": "application/json",
         }
         try:
-            if self._client is not None:
-                resp = self._client.post(url, json=payload, headers=headers)
-            else:
-                resp = httpx.post(url, json=payload, headers=headers, timeout=self.timeout)
+            resp = self._client.post(url, json=payload, headers=headers)
         except httpx.HTTPError as exc:
             raise LLMError("HTTP 请求失败：{}".format(exc)) from exc
 
