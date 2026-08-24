@@ -4,6 +4,21 @@
 
 ## [Unreleased]
 
+## [0.2.1]
+
+### Added
+- 报告新增「文献检索结果」段，展示 query / 命中论文 / gap_note / 来源（M9）
+- 检索相关性优化：聚焦关键词翻译 + arXiv 标题字段约束 + 相关性过滤（M10）
+- 多维加权 novelty 评分：5 维度 + 0~100 总分 + 分数段→动作映射（Reject/Weak Reject/Revise/Accept/Priority）（M11）
+
+### Fixed
+- 代理支持（`PAPERMINE_PROXY`，.env 配置，LLM/检索可走代理）
+- 检索修复：arXiv 301 重定向、中文查询翻译为英文、Semantic Scholar 429 退避重试
+
+### Changed
+- httpx 复用长连接（连接池 + keep-alive + TLS 复用），消除每次调用新建连接
+- 测试从 147 增至 162 个
+
 ## [0.2.0]
 
 ### Added
