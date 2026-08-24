@@ -227,15 +227,15 @@ class WeightedTotalTest(unittest.TestCase):
 
 class ScoreBandTest(unittest.TestCase):
     def test_bands(self) -> None:
-        # 左开右闭：40/60/70 归上一档，80 归 Accept，>80 归 Priority
+        # 左闭右开：40→Weak Reject、60→Revise、70→Accept、80→Accept、>80→Priority
         self.assertEqual(_score_band(39.9), ("Reject", "drop"))
-        self.assertEqual(_score_band(40), ("Reject", "drop"))
+        self.assertEqual(_score_band(40), ("Weak Reject", "drop"))
         self.assertEqual(_score_band(40.1), ("Weak Reject", "drop"))
         self.assertEqual(_score_band(59.9), ("Weak Reject", "drop"))
-        self.assertEqual(_score_band(60), ("Weak Reject", "drop"))
+        self.assertEqual(_score_band(60), ("Revise", "rework"))
         self.assertEqual(_score_band(60.1), ("Revise", "rework"))
         self.assertEqual(_score_band(69.9), ("Revise", "rework"))
-        self.assertEqual(_score_band(70), ("Revise", "rework"))
+        self.assertEqual(_score_band(70), ("Accept", "proceed"))
         self.assertEqual(_score_band(70.1), ("Accept", "proceed"))
         self.assertEqual(_score_band(80), ("Accept", "proceed"))
         self.assertEqual(_score_band(80.1), ("Priority", "proceed"))

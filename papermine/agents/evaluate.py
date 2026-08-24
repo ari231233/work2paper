@@ -322,18 +322,18 @@ def _weighted_total(dims: Dict[str, Any]) -> float:
 def _score_band(score: float) -> Tuple[str, str]:
     """总分 → (Agent 建议动作标签, 旧 verdict)。
 
-    分数段（docs/build-plan.md §4 M11，区间约定为左开右闭）：
-        (-∞, 40]   Reject      → drop
-        (40, 60]   Weak Reject → drop
-        (60, 70]   Revise      → rework
-        (70, 80]   Accept      → proceed
+    分数段（docs/build-plan.md §4 M11，区间约定为左闭右开）：
+        (-∞, 40)   Reject      → drop
+        [40, 60)   Weak Reject → drop
+        [60, 70)   Revise      → rework
+        [70, 80]   Accept      → proceed
         (80, +∞)   Priority    → proceed
     """
-    if score <= 40:
+    if score < 40:
         return ("Reject", "drop")
-    if score <= 60:
+    if score < 60:
         return ("Weak Reject", "drop")
-    if score <= 70:
+    if score < 70:
         return ("Revise", "rework")
     if score <= 80:
         return ("Accept", "proceed")
