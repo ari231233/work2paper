@@ -287,111 +287,21 @@ def run(dossier: Dossier, llm: LLMProvider) -> None
   1. 单测通过 + 冒烟不回归；
   2. 对 sample 项目评估，5 个维度分**不全相等**，报告能看到分维度明细。
 
-### M12 — Controlled Experiment Loop（实验执行闭环）
+### M12 — Evidence Validation Agent（证据验证）
 
-**背景**：当前闭环停留在「科研规划」（understand → abstract → retrieve → generate → evaluate → plan → reflect），缺少真实实验验证。目标是增加一个**受控实验执行闭环**：
-
-```
-idea/hypothesis → experiment plan → controlled code modification
-    → sandbox execution → metric evaluation → result analysis → experience update
-```
-
-**注意**：本阶段**不是开放式 AutoResearch**。真实科研需要可执行代码 + 真实数据 + 可复现环境，故第一阶段采用 **Controlled Experiment Loop**：限制 Agent 在已有 benchmark 环境内实验。
-
-#### 设计原则
-
-**1. 不允许 Agent 任意执行代码**
-
-- 禁止 `os.system()` / `subprocess` 任意调用；所有实验必须经 `ExperimentExecutor`。
-- 执行环境必须隔离（sandbox runtime），至少支持：timeout / memory limit / filesystem isolation / stdout+stderr capture。
-
-```python
-experiment_executor.run(experiment_dir, command, timeout)
-# -> {"status": "success", "logs": "...", "metrics": {}, "duration": xxx}
-```
-
-**2. 实验范围限制**
-
-- 第一版只支持 **Benchmark-based experiment**。每个实验项目必须提供：
-  ```
-  benchmark/
-      train.py
-      evaluate.py
-      config.yaml
-  ```
-- Agent 可以：改配置、改指定代码模块、调整实验参数。
-- Agent 不能：下载未知代码、修改整个工程结构、无限搜索实验空间。
-
-#### 新增模块
-
-**M12.1 Benchmark Registry** — `papermine/experiment/registry.py`
-
-```python
-class BenchmarkRegistry:
-    def register(name, path, metric_schema): ...
-    def get(name): ...
-```
-
-保存形如：`{"name": "sst2_adapter", "path": "...", "metric": {"accuracy": "max"}}`
-
-**M12.2 Experiment Executor** — `papermine/experiment/executor.py`
-
-```python
-def run_experiment(benchmark, command, timeout=3600) -> dict
-```
-
-职责：创建隔离环境 → 执行实验 → 捕获日志 → 收集 metric → 返回 experiment_result。异常（timeout / execution error / metric missing）**必须有降级行为**。
-
-**M12.3 Experiment Evaluator** — `papermine/experiment/evaluator.py`
-
-- 输入 `baseline_result` + `experiment_result`，输出：
-  ```json
-  {"improvement": 0.008, "direction": "positive", "summary": "accuracy improved"}
-  ```
-- 支持 max metric（accuracy：new-old）与 min metric（loss：old-new）。
-
-**M12.4 Experiment Dossier Extension**
-
-- Dossier 新增 `experiments: list`，每条：
-  `{id, idea_id, hypothesis, code_changes, baseline_metrics, experiment_metrics, effect, analysis, timestamp}`
-- 目的：让实验结果进入长期经验。
-
-**M12.5 Reflect Integration**（改 M7 reflect）
-
-- 实验结果参与经验沉淀。示例：idea「增加 memory 机制」+ 实验 success_rate 60%→68% → reflect 输出：
-  ```json
-  {
-    "principle": "对于长流程 agent 任务，显式 memory 能够减少重复探索",
-    "policy": {"target": "planning_agent",
-               "directive": "when task requires multi-step reasoning, enable memory retrieval"},
-    "effect": "+8% success rate",
-    "confidence": 0.8
-  }
-  ```
-
-#### 最小实验场景
-
-- 不选大规模训练；第一版需提供**真实可运行 benchmark**。
-- 推荐 NLP 分类：dataset SST-2 / AG-News，baseline BERT/RoBERTa，metric accuracy/F1。
-- 流程：baseline accuracy=0.92 → Agent 改 adapter layer → accuracy=0.928 → 产生 experiment evidence。
-- 要求 sample benchmark：有真实数据、可真实训练、可真实评价；若无法提供完整 benchmark，至少提供 **mock benchmark interface** 保证 pipeline 可运行。
-
-#### Orchestrator 集成
-
-- 状态扩展：`UNDERSTAND → ABSTRACT → RETRIEVE → GENERATE → EVALUATE → PLAN → EXPERIMENT → ANALYZE_RESULT → REFLECT`（新增 `EXPERIMENT` 状态）。
-- `auto=False`：人工确认后执行；`auto=True`：自动执行 benchmark 实验。
-
-#### 验收标准
-
-1. 可注册一个 benchmark；2. 可经 executor 运行实验；3. sandbox 执行失败不影响主程序；4. 实验结果写入 Dossier；5. reflect 能据实验结果生成 experience；6. 端到端（idea → experiment plan → execution → metric → reflection → experience）完整跑通。
-
-#### 交付报告必须包含
-
-1. 修改文件列表；2. 新增接口说明；3. sandbox 方案说明；4. 实验 benchmark 说明；5. 测试结果；6. 已知限制。
-
-#### 注意
-
-**不实现开放式科研自动修改。** 当前目标：建立一个可靠、可复现、可验证的实验反馈闭环。未来再扩展 Experiment Agent / Code Agent / Autonomous Research Loop（真正 AutoResearch）。
+- **目标**：验证候选 idea 的 claim 是否有足够证据支撑，输出「证据强度 + 理由」，帮学生判断"这个点子站不站得住"。**不跑实验，只做证据审查**。
+- **input**：`idea`（claim + novelty_hypothesis + literature_refs）。
+- **output**：`evidence`（weak / medium / strong）+ `reason`（为什么弱、如何强化）。
+- **检查维度**（4 项，均为"证据审查"而非"实验执行"）：
+  1. 有没有类似论文？（文献对拍）
+  2. 有没有理论依据？（理论支撑）
+  3. 有没有实验设计支持？（别人做过什么、这个 claim 能否被验证）
+  4. 这个 claim 是否过强？（claim 强度校准）
+- **示例**：
+  - idea：`memory 机制可以提升 agent 规划能力`
+  - output：`Evidence: weak` + `Reason: 已有 memory work 很多，需要明确区别：不是 memory，而是 adaptive policy memory`
+- **依赖**：M5（文献检索，提供对拍依据）+ M11（多维 novelty 评分，维度可复用）。
+- **验收**：对 sample 项目，每个 idea 输出 `evidence` 强度 + `reason`。
 
 ---
 
