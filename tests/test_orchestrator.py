@@ -311,5 +311,62 @@ class RenderReportLiteratureTest(unittest.TestCase):
         self.assertIn("离线/无结果", md)
 
 
+class RenderReportNoveltyDimensionsTest(unittest.TestCase):
+    """M11：报告渲染展示分维度 novelty 明细（配合 M9 文献段）。"""
+
+    def _dossier(self) -> Dossier:
+        d = Dossier()
+        d.meta["run_id"] = "run_test"
+        d.meta["llm_backend"] = "null"
+        return d
+
+    def test_render_evaluation_dimension_details(self):
+        d = self._dossier()
+        d.evaluations = [{
+            "idea_ref": "i1",
+            "novelty_score": 63.0,
+            "novelty_band": "Revise",
+            "novelty_dimensions": {
+                "problem_novelty": {"score": 4, "reason": "问题未被充分解决（gap 支持）"},
+                "method_novelty": {"score": 3, "reason": "方法以组合为主，新机制有限"},
+                "technical_depth": {"score": 2, "reason": "未解决关键技术瓶颈"},
+                "gap": {"score": 4, "reason": "与 SOTA 差异明确"},
+                "generalization": {"score": 3, "reason": "可迁移到其他任务"},
+            },
+            "data_feasibility": "high",
+            "workload_hours": 60,
+            "venue_guess": "CCF-B",
+            "verdict": "rework",
+            "rework_reason": "新颖性偏低",
+            "evidence": [],
+        }]
+        md = orchestrator._render_report_md(d)
+        self.assertIn("## 可行性评估", md)
+        self.assertIn("分维度明细", md)
+        self.assertIn("novelty=63.0（Revise）", md)
+        for label in ("问题新颖性", "方法新颖性", "技术突破性",
+                      "与已有工作的差异程度", "可推广价值"):
+            self.assertIn(label, md)
+        self.assertIn("问题未被充分解决（gap 支持）", md)
+
+    def test_render_old_evaluation_without_dimensions(self):
+        """旧格式评估（无 novelty_dimensions）不崩溃，仅回退为单总分展示。"""
+        d = self._dossier()
+        d.evaluations = [{
+            "idea_ref": "i1",
+            "novelty_score": 3.5,
+            "data_feasibility": "high",
+            "workload_hours": 60,
+            "venue_guess": "某会议",
+            "verdict": "proceed",
+            "rework_reason": None,
+            "evidence": [],
+        }]
+        md = orchestrator._render_report_md(d)
+        self.assertIn("## 可行性评估", md)
+        self.assertIn("novelty=3.5", md)
+        self.assertNotIn("分维度明细", md)
+
+
 if __name__ == "__main__":
     unittest.main()

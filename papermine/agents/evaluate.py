@@ -1,6 +1,6 @@
 """⑤ 可行性评估 Agent：ideas -> evaluations（证据驱动）。
 
-对应 docs/build-plan.md §3.3 / §4 M6 与 docs/architecture.md §5 ⑤：
+对应 docs/build-plan.md §3.3 / §4 M6 / §4 M11 与 docs/architecture.md §5 ⑤：
 
 评估是**证据驱动**的，不是 LLM 自评（architecture §8「LLM 自评不可靠」）：
 
@@ -14,17 +14,21 @@
 | 风险        | metrics / baseline 缺失        | 规则                      |
 +-------------+--------------------------------+---------------------------+
 
-verdict ∈ {proceed, rework, drop}；每条评估必须挂 `evidence`（provenance 强制）。
+M11 升级：novelty 从单一 0~5 分改为**多维加权评分**（docs/build-plan.md §4 M11）：
 
-降级路径：无 key（NullProvider 空结果）、LLMError、SchemaError 时，novelty / workload
-降级为确定性规则估算；数据可得性 / 档位**始终**由确定性规则计算，不依赖 LLM。
+- 5 个维度各 0~5，加权归一后总分 0~100：``总分 = Σ(权重 × 维度分) / 5``（权重合计 100）；
+- 分数段映射旧 verdict：Reject / Weak Reject → drop、Revise → rework、Accept / Priority → proceed；
+- 每维分数必须给出**差异化理由**（引用 gap_note / 文献证据），从机制上避免趋同；
+- 无 LLM 时按维度规则粗估（gap 信号强弱 / 方法组合度 / 通用性等），标低置信。
+
+verdict ∈ {proceed, rework, drop}；每条评估必须挂 `evidence`（provenance 强制）。
 """
 from __future__ import annotations
 
 import json
 import re
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from ..dossier import Dossier
 from ..llm import LLMError, LLMProvider, SchemaError
@@ -32,9 +36,12 @@ from ..llm import LLMError, LLMProvider, SchemaError
 __all__ = [
     "run",
     "EVALUATE_SCHEMA",
+    "NOVELTY_DIMENSIONS",
     "_data_feasibility",
-    "_deterministic_novelty",
+    "_deterministic_dimensions",
     "_deterministic_workload",
+    "_weighted_total",
+    "_score_band",
     "_decide_verdict",
     "_rework_reason",
     "_guess_venue",
@@ -43,9 +50,22 @@ __all__ = [
 ]
 
 # 本 Agent prompt 版本：优先读 prompts/evaluate.md 头的 version，缺失时用此兜底
-_PROMPT_VERSION = "v1"
+_PROMPT_VERSION = "v2"
 _PROMPT_FILENAME = "evaluate.md"
 _PROMPT_VERSION_RE = re.compile(r"<!--\s*version:\s*(\d+)\s*-->")
+
+# M11 多维加权 novelty 评分体系：维度名 -> (中文标签, 权重)。
+# 权重合计 100；各维度分 0~5；总分 = Σ(权重 × 维度分) / 5 ∈ [0, 100]。
+NOVELTY_DIMENSIONS: Tuple[Tuple[str, str, int], ...] = (
+    ("problem_novelty", "问题新颖性", 20),   # 是否提出了过去未被充分解决的问题？
+    ("method_novelty", "方法新颖性", 35),    # 核心方法是否有新机制，而非简单组合已有模块？
+    ("technical_depth", "技术突破性", 20),   # 是否解决了关键技术瓶颈？
+    ("gap", "与已有工作的差异程度", 15),     # 相比 SOTA 是否有明确区别？
+    ("generalization", "可推广价值", 10),    # 能否迁移到其他任务？
+)
+_DIM_KEYS: Tuple[str, ...] = tuple(k for k, _l, _w in NOVELTY_DIMENSIONS)
+_DIM_LABELS: Dict[str, str] = {k: label for k, label, _w in NOVELTY_DIMENSIONS}
+_DIM_WEIGHTS: Dict[str, int] = {k: w for k, _l, w in NOVELTY_DIMENSIONS}
 
 # 静态档位库：检索到的 venue 名称 -> 档位（architecture §5 ⑤「规则 + 静态档位库」的 MVP 子集）
 _VENUE_TIERS = {
@@ -71,17 +91,35 @@ _VENUE_TIERS = {
     "计算机研究与发展": "中文核心（A类）", "中文信息学报": "中文核心",
 }
 
+
+def _dim_schema() -> Dict[str, Any]:
+    """单个评分维度的输出契约：0~5 分数 + 差异化理由。"""
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["score", "reason"],
+        "properties": {
+            "score": {"type": "number"},
+            "reason": {"type": "string"},
+        },
+    }
+
+
 # 本 Agent 的 LLM 输出契约（schema 校验走 papermine/llm.py 的极简子集）
 EVALUATE_SCHEMA: Dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
     "required": [
-        "novelty_score", "novelty_reason", "workload_hours",
+        "novelty_dimensions", "workload_hours",
         "verdict_suggestion", "rework_reason",
     ],
     "properties": {
-        "novelty_score": {"type": "number"},
-        "novelty_reason": {"type": "string"},
+        "novelty_dimensions": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": list(_DIM_KEYS),
+            "properties": {k: _dim_schema() for k in _DIM_KEYS},
+        },
         "workload_hours": {"type": "number"},
         "verdict_suggestion": {
             "type": "string", "enum": ["proceed", "rework", "drop"],
@@ -92,8 +130,10 @@ EVALUATE_SCHEMA: Dict[str, Any] = {
 
 _SYSTEM_PROMPT_FALLBACK = (
     "你是 papermine 的「可行性评估 Agent」。对候选创新点做证据驱动的可行性评估："
-    "novelty 对照文献 gap_note 打分（0~5），估计工作量，给出 verdict_suggestion∈{proceed,rework,drop}，"
-    "非 proceed 时给出 rework_reason。只输出符合 schema 的 JSON 对象。"
+    "novelty 从 5 个维度分别打分（problem_novelty / method_novelty / technical_depth / "
+    "gap / generalization，各 0~5，每维必须给出引用 gap_note 的差异化理由），估计工作量，"
+    "给出 verdict_suggestion∈{proceed,rework,drop}，非 proceed 时给出 rework_reason。"
+    "只输出符合 schema 的 JSON 对象。"
 )
 
 
@@ -180,41 +220,124 @@ def _tier_of(venue: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# 确定性兜底估算：novelty / workload / 档位
+# 确定性兜底估算：novelty（多维粗估）/ workload / 档位
 # ---------------------------------------------------------------------------
 
-def _shared_3grams(a: str, b: str) -> int:
-    """计算两个文本在去掉标点后共享的三字串数量（容忍中文分词差异）。"""
-    a = re.sub(r"[\s,，。;；:：、()（）\[\]【】]+", "", a)
-    b = re.sub(r"[\s,，。;；:：、()（）\[\]【】]+", "", b)
-    if len(a) < 3 or len(b) < 3:
-        return 0
-    grams = {a[i:i + 3] for i in range(len(a) - 2)}
-    return sum(1 for g in grams if g in b)
-
-
-def _deterministic_novelty(idea: dict, gap_notes: List[str]) -> float:
-    """确定性 novelty 兜底：对照 gap_note 文本给保守估计（LLM 缺失时用，标低置信）。
-
-    无 gap_note -> 2.5（无法对拍）；gap 含强/弱「缺口」信号 -> 加分；idea 与 gap 文本
-    重合度高 -> 再略加。上限 5.0。注意：确定性兜底不逐 idea 匹配 gap 相关性，LLM 路径更准。
-    """
+def _gap_signal_strength(gap_notes: List[str]) -> int:
+    """gap 信号强度：0 = 无 gap（无法对拍）；1 = 弱信号；2 = 强信号（明确缺口）。"""
     if not gap_notes:
-        return 2.5
-    joined = " ".join(str(g) for g in gap_notes)
-    low = joined.lower()
-    score = 2.0
+        return 0
+    low = " ".join(str(g) for g in gap_notes).lower()
     strong = ("尚未", "没有系统", "缺乏系统", "no systematic", "rarely",
-              "open problem", "未解决", "缺口")
+              "open problem", "未解决", "缺口", "未有", "少有")
     weak = ("gap", "不足", "limited", "missing", "challenge", "缺乏")
     if any(m in low for m in strong):
-        score += 1.0
-    elif any(m in low for m in weak):
-        score += 0.5
-    idea_text = " ".join(str(idea.get(k) or "") for k in ("claim", "novelty_hypothesis"))
-    if _shared_3grams(idea_text, joined) >= 2:
-        score += 0.5
-    return round(min(5.0, score), 1)
+        return 2
+    if any(m in low for m in weak):
+        return 1
+    return 0
+
+
+def _deterministic_dimensions(idea: dict, gap_notes: List[str],
+                              facts: Dict[str, Any]) -> Dict[str, Any]:
+    """无 LLM 时的多维粗估（低置信，报告会标注）：按维度规则给分，保证维度间有区分度。
+
+    规则信号（documented in build-plan §4 M11 要点 4）：
+    - gap 信号强弱 → 问题新颖性 / 与已有工作的差异度；
+    - 方法组合度 + 新机制关键词 → 方法新颖性；
+    - 重方法 / 方法复杂度 → 技术突破性；
+    - 通用 / 可复用主张 → 可推广价值。
+    """
+    methods = facts.get("methods") or []
+    claim = " ".join(str(idea.get(k) or "") for k in ("claim", "novelty_hypothesis"))
+    strength = _gap_signal_strength(gap_notes)
+    gap_desc = {0: "无 gap_note，无法对拍", 1: "gap 信号弱", 2: "gap 信号强（明确缺口）"}[strength]
+
+    # 1) 问题新颖性：gap 越强 → 问题越未被充分解决（无 gap 保守 2.0）
+    problem_score = min(5.0, 2.0 + 0.5 * strength)
+
+    # 2) 方法新颖性：新机制信号 vs 简单组合信号
+    has_new_mechanism = any(k in claim for k in (
+        "新机制", "自适应", "端到端", "可微", "联合优化", "自监督", "对比学习", "可学习"))
+    has_combination = any(k in claim for k in ("结合", "组合", "集成", "混合", "融合"))
+    if has_new_mechanism and not has_combination:
+        method_score = 4.0
+    elif has_new_mechanism:
+        method_score = 3.5
+    elif has_combination:
+        method_score = 2.0
+    else:
+        method_score = 2.5
+
+    # 3) 技术突破性：重方法 / 有方法信号
+    heavy = any(m in ("深度学习", "集成学习", "随机森林", "XGBoost", "LSTM",
+                      "Transformer", "图神经网络") for m in methods)
+    tech_score = 3.5 if heavy else (2.5 if methods else 2.0)
+
+    # 4) 与已有工作的差异度：直接映射 gap 强度（比问题新颖性更敏感）
+    gap_score = min(5.0, 1.0 + 0.75 * strength)
+
+    # 5) 可推广价值：通用 / 框架主张
+    general_claim = any(k in claim for k in ("通用", "框架", "可复用", "平台", "工具"))
+    gen_score = 4.0 if general_claim else 2.0
+
+    gap_ref = str(gap_notes[0])[:120] if gap_notes else "（空）"
+    return {
+        "problem_novelty": {
+            "score": round(problem_score, 1),
+            "reason": "规则粗估（问题新颖性）：{}；gap_note={}".format(gap_desc, gap_ref),
+        },
+        "method_novelty": {
+            "score": round(method_score, 1),
+            "reason": "规则粗估（方法新颖性）：claim 新机制信号={}、简单组合信号={}，facts 方法数={}".format(
+                has_new_mechanism, has_combination, len(set(methods))),
+        },
+        "technical_depth": {
+            "score": round(tech_score, 1),
+            "reason": "规则粗估（技术突破性）：facts.methods={}".format(
+                "、".join(methods) if methods else "空"),
+        },
+        "gap": {
+            "score": round(gap_score, 1),
+            "reason": "规则粗估（与已有工作差异）：gap 信号强度={}".format(strength),
+        },
+        "generalization": {
+            "score": round(gen_score, 1),
+            "reason": "规则粗估（可推广价值）：通用/复用主张={}".format(general_claim),
+        },
+    }
+
+
+def _weighted_total(dims: Dict[str, Any]) -> float:
+    """加权合成 0~100 总分：``总分 = Σ(权重 × 维度分) / 5``（权重合计 100、维度分 0~5）。"""
+    total = 0.0
+    for key, _label, weight in NOVELTY_DIMENSIONS:
+        item = (dims or {}).get(key)
+        score = _coerce_number(item.get("score"), 0.0, 0.0, 5.0) \
+            if isinstance(item, dict) else 0.0
+        total += weight * float(score)
+    return round(total / 5.0, 1)
+
+
+def _score_band(score: float) -> Tuple[str, str]:
+    """总分 → (Agent 建议动作标签, 旧 verdict)。
+
+    分数段（docs/build-plan.md §4 M11）：
+        <40        Reject      → drop
+        40~60      Weak Reject → drop
+        60~70      Revise      → rework
+        70~80      Accept      → proceed
+        >80        Priority    → proceed
+    """
+    if score < 40:
+        return ("Reject", "drop")
+    if score < 60:
+        return ("Weak Reject", "drop")
+    if score < 70:
+        return ("Revise", "rework")
+    if score <= 80:
+        return ("Accept", "proceed")
+    return ("Priority", "proceed")
 
 
 def _deterministic_workload(idea: dict, facts: Dict[str, Any]) -> int:
@@ -241,15 +364,17 @@ def _is_tool_claim(claim: str) -> bool:
 
 
 def _rule_venue_guess(facts: Dict[str, Any], idea: dict, novelty: float) -> str:
-    """无检索 venue 时的规则档位猜测（复用 v0.1 mining 思路，依据 idea 类型 + novelty）。"""
+    """无检索 venue 时的规则档位猜测（复用 v0.1 mining 思路，依据 idea 类型 + novelty 总分）。"""
     claim = str(idea.get("claim") or "")
     if _is_tool_claim(claim):
         return "中文核心 / EI 会议（系统/工具类）"
     if "实证" in claim:
         return "中文核心 / 应用类期刊"
-    if novelty >= 4.0:
+    if novelty >= 80:
         return "CCF-B / 中文核心或 EI 会议"
-    return "CCF-C / 中文核心"
+    if novelty >= 60:
+        return "CCF-C / 中文核心"
+    return "EI 会议 / 中文核心（创新度有限）"
 
 
 def _guess_venue(facts: Dict[str, Any], idea: dict,
@@ -269,25 +394,23 @@ def _guess_venue(facts: Dict[str, Any], idea: dict,
 
 
 # ---------------------------------------------------------------------------
-# verdict 决策（证据驱动硬护栏 + LLM 建议）
+# verdict 决策（分数段映射 + 证据驱动硬护栏 + LLM 建议）
 # ---------------------------------------------------------------------------
 
 def _decide_verdict(novelty: float, data_feasibility: str, workload: float,
                     suggestion: Optional[str]) -> str:
-    """综合 verdict：硬护栏优先（不依赖 LLM 自评），LLM 建议仅作参考。"""
-    if novelty < 2.0:
-        return "drop"          # 新颖性不足，与文献对拍无差异
+    """综合 verdict：分数段映射旧 verdict 为基础，证据硬护栏优先，LLM 建议仅作下调参考。"""
+    _band, base = _score_band(novelty)
     if data_feasibility == "low":
         return "rework"        # 无数据支撑，回炉补数据
     if workload > 400:
         return "rework"        # 工作量过大，需拆分或回炉
-    if data_feasibility == "medium" and novelty < 3.0:
+    if data_feasibility == "medium" and base == "drop":
         return "rework"        # 中低新颖性 + 数据不完整
-    if suggestion in ("drop", "rework"):
+    # LLM 建议仅可下调（proceed -> rework/drop），不可把 drop 上调
+    if suggestion in ("drop", "rework") and base == "proceed":
         return suggestion
-    if novelty >= 3.0:
-        return "proceed"
-    return "rework"
+    return base
 
 
 def _rework_reason(verdict: str, novelty: float, data_feasibility: str,
@@ -295,12 +418,15 @@ def _rework_reason(verdict: str, novelty: float, data_feasibility: str,
     """生成 rework_reason（proceed 时为 None）。"""
     if verdict == "proceed":
         return None
+    band_label, _ = _score_band(novelty)
     if verdict == "drop":
-        return "新颖性不足：novelty={} 与文献 gap 对拍无明显差异，建议放弃该创新点".format(novelty)
+        return "新颖性不足：novelty_score={}（{}），与文献 gap 对拍无明显差异，建议放弃该创新点".format(
+            novelty, band_label)
     if data_feasibility == "low":
         return "数据可得性低：assets.facts 未识别到数据/指标，需回炉补充评测数据（回退①项目理解补采集）"
-    if novelty < 3.0:
-        return "新颖性偏低：novelty={}，建议回炉到②问题抽象/④创新点生成以强化 novelty".format(novelty)
+    if novelty < 70:
+        return "新颖性偏低：novelty_score={}（{}），建议回炉到②问题抽象/④创新点生成以强化 novelty".format(
+            novelty, band_label)
     if workload > 400:
         return "工作量过大：workload={}h，建议拆分范围或回炉缩小目标".format(workload)
     if llm_reason:
@@ -361,9 +487,40 @@ def _call_llm(llm: LLMProvider, system_prompt: str, idea: dict,
     return result
 
 
-def _assemble_evidence(idea: dict, gap_notes: List[str], facts: Dict[str, Any],
-                       venue_dist: Dict[str, int], novelty_reason: str) -> List[dict]:
-    """装配评估证据链（provenance 强制：每条结论挂证据源）。"""
+def _extract_dimensions(raw: Any) -> Optional[Dict[str, Any]]:
+    """从 LLM 输出提取并规范化 5 维度分；任一维度缺失/非法 → 返回 None（触发确定性兜底）。"""
+    if not isinstance(raw, dict):
+        return None
+    dims: Dict[str, Any] = {}
+    for key in _DIM_KEYS:
+        item = raw.get(key)
+        if not isinstance(item, dict):
+            return None
+        score = _coerce_number(item.get("score"), None, 0.0, 5.0)
+        if score is None:
+            return None
+        reason = str(item.get("reason") or "").strip()
+        if not reason:
+            return None
+        dims[key] = {"score": round(float(score), 1), "reason": reason}
+    return dims
+
+
+def _dims_converged(dims: Dict[str, Any]) -> bool:
+    """判断 5 个维度分是否完全相等（LLM 趋同信号，用于报告可见性标注）。"""
+    scores: List[float] = []
+    for key in _DIM_KEYS:
+        item = (dims or {}).get(key)
+        if isinstance(item, dict) and isinstance(item.get("score"), (int, float)) \
+                and not isinstance(item.get("score"), bool):
+            scores.append(round(float(item["score"]), 1))
+    return len(scores) == len(_DIM_KEYS) and len(set(scores)) == 1
+
+
+def _assemble_evidence(gap_notes: List[str], facts: Dict[str, Any],
+                       venue_dist: Dict[str, int], dims: Dict[str, Any],
+                       degraded: bool, converged: bool) -> List[dict]:
+    """装配评估证据链（provenance 强制：每条结论挂证据源，含 M11 分维度明细）。"""
     evidence: List[dict] = []
     if gap_notes:
         for g in gap_notes:
@@ -380,8 +537,26 @@ def _assemble_evidence(idea: dict, gap_notes: List[str], facts: Dict[str, Any],
     if venue_dist:
         evidence.append({"source": "literature.venues",
                          "note": "检索论文档位分布：" + _format_venue_distribution(venue_dist)})
-    if novelty_reason:
-        evidence.append({"source": "llm", "note": novelty_reason[:200]})
+    # 分维度明细：每维分数 + 理由挂进证据链（M11）
+    for key, label, _weight in NOVELTY_DIMENSIONS:
+        item = (dims or {}).get(key)
+        if isinstance(item, dict):
+            reason = str(item.get("reason") or "").strip()
+            if reason:
+                evidence.append({
+                    "source": "novelty_dimensions.{}".format(key),
+                    "note": "{}={}，{}".format(label, item.get("score"), reason[:160]),
+                })
+    if degraded:
+        evidence.append({
+            "source": "degradation",
+            "note": "novelty 维度分为确定性规则粗估（无 LLM 或 LLM 输出非法），低置信",
+        })
+    if converged:
+        evidence.append({
+            "source": "degradation",
+            "note": "各维度分数趋同（区分度不足），建议人工复核",
+        })
     return evidence
 
 
@@ -393,10 +568,14 @@ def _evaluate_idea(idea: dict, facts: Dict[str, Any], gap_notes: List[str],
     idea_id = str(idea.get("idea_id") or "").strip()
     out = _call_llm(llm, system_prompt, idea, gap_notes, venue_summary, facts)
 
-    novelty = _coerce_number(out.get("novelty_score"), None, 0.0, 5.0)
-    if novelty is None:
-        novelty = _deterministic_novelty(idea, gap_notes)
-    novelty = round(float(novelty), 1)
+    # M11：5 维度分（优先 LLM，否则确定性粗估），加权合成 0~100 总分
+    dims = _extract_dimensions(out.get("novelty_dimensions"))
+    degraded = dims is None
+    if degraded:
+        dims = _deterministic_dimensions(idea, gap_notes, facts)
+    novelty = _weighted_total(dims)
+    band_label, _ = _score_band(novelty)
+    converged = _dims_converged(dims)
 
     workload = _coerce_number(out.get("workload_hours"), None, 10.0, 1000.0)
     if workload is None:
@@ -407,7 +586,6 @@ def _evaluate_idea(idea: dict, facts: Dict[str, Any], gap_notes: List[str],
     if suggestion not in ("proceed", "rework", "drop"):
         suggestion = None
 
-    novelty_reason = str(out.get("novelty_reason") or "").strip()
     llm_rework_reason = out.get("rework_reason")
     if not isinstance(llm_rework_reason, str) or not llm_rework_reason.strip():
         llm_rework_reason = None
@@ -416,11 +594,13 @@ def _evaluate_idea(idea: dict, facts: Dict[str, Any], gap_notes: List[str],
     verdict = _decide_verdict(novelty, data_feasibility, float(workload), suggestion)
     rework_reason = _rework_reason(verdict, novelty, data_feasibility,
                                    float(workload), llm_rework_reason)
-    evidence = _assemble_evidence(idea, gap_notes, facts, venue_dist, novelty_reason)
+    evidence = _assemble_evidence(gap_notes, facts, venue_dist, dims, degraded, converged)
 
     return {
         "idea_ref": idea_id,
         "novelty_score": novelty,
+        "novelty_band": band_label,
+        "novelty_dimensions": dims,
         "data_feasibility": data_feasibility,
         "workload_hours": workload,
         "venue_guess": venue_guess,
@@ -435,7 +615,7 @@ def _evaluate_idea(idea: dict, facts: Dict[str, Any], gap_notes: List[str],
 # ---------------------------------------------------------------------------
 
 def run(dossier: Dossier, llm: LLMProvider) -> None:
-    """ideas -> evaluations（证据驱动），原地写 dossier.evaluations。
+    """ideas -> evaluations（证据驱动，M11 多维加权），原地写 dossier.evaluations。
 
     冻结契约（docs/build-plan.md §3.3）：
         def run(dossier: Dossier, llm: LLMProvider) -> None

@@ -389,9 +389,24 @@ def _render_report_md(dossier: Dossier) -> str:
     lines.append("")
     if dossier.evaluations:
         for ev in dossier.evaluations:
+            novelty_disp = str(ev.get("novelty_score"))
+            band = ev.get("novelty_band")
+            if band:
+                novelty_disp += "（{}）".format(band)
             lines.append("- **{}**：novelty={}，数据可得性={}，工作量≈{}h，verdict={}".format(
-                ev.get("idea_ref"), ev.get("novelty_score"), ev.get("data_feasibility"),
+                ev.get("idea_ref"), novelty_disp, ev.get("data_feasibility"),
                 ev.get("workload_hours"), ev.get("verdict")))
+            dims = ev.get("novelty_dimensions")
+            if isinstance(dims, dict) and dims:
+                lines.append("  - 分维度明细（各 0~5，加权合成 novelty 总分）：")
+                for key, label, weight in evaluate.NOVELTY_DIMENSIONS:
+                    item = dims.get(key)
+                    if isinstance(item, dict):
+                        reason = str(item.get("reason") or "").strip()
+                        seg = "{}（权重{}）：{}".format(label, weight, item.get("score"))
+                        if reason:
+                            seg += " — " + reason
+                        lines.append("    - " + seg)
             if ev.get("rework_reason"):
                 lines.append("  - 回炉原因：{}".format(ev["rework_reason"]))
     else:
