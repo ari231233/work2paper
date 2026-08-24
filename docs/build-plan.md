@@ -258,7 +258,7 @@ def run(dossier: Dossier, llm: LLMProvider) -> None
 - **依赖**：M6（`papermine/agents/evaluate.py`）+ M9（报告渲染，用于展示分维度明细）。
 - **产出**：改造 `evaluate.py`（`EVALUATE_SCHEMA` + 评分逻辑）+ 报告渲染 + 单测。
 
-- **评分维度（各维度 0~5，加权合成总分）：**
+- **评分维度（各维度 0~5，加权归一后总分 0~100）：**
 
 | 维度 | 权重 | 核心问题 |
 |---|---:|---|
@@ -268,8 +268,18 @@ def run(dossier: Dossier, llm: LLMProvider) -> None
 | 与已有工作的差异程度（Gap） | 15 | 相比 SOTA 是否有明确区别？ |
 | 可推广价值（Generalization） | 10 | 是否能迁移到其他任务？ |
 
+- **总分 → Agent 建议动作：**
+
+| 分数 | 含义 | Agent 建议动作 |
+|-|-|-|
+| <40 | 基本没有创新，已有方法变体 | Reject |
+| 40-60 | 有一定改进，但偏工程优化 | Weak Reject / 保留想法 |
+| 60-70 | 有明确创新点，但需要加强理论或实验 | Revise |
+| 70-80 | 值得投入，具备论文潜力 | Accept |
+| >80 | 明显创新，可能形成强论文贡献 | Priority |
+
 - **要点**：
-  1. `EVALUATE_SCHEMA` 改为要求 5 个维度分 + 每维理由，加权合成 `novelty_score`（保留 0~5 总分，兼容旧 verdict 逻辑）；
+  1. `EVALUATE_SCHEMA` 改为要求 5 个维度分 + 每维理由，加权合成 0~100 总分 `novelty_score`（公式：`总分 = Σ(权重×维度分) / 5`，权重合计 100、维度分 0~5）；分数段映射旧 verdict：Reject/Weak Reject → drop、Revise → rework、Accept/Priority → proceed；
   2. 每维分数**必须给出差异化理由**（引用 gap_note / 文献证据），从机制上避免趋同；
   3. 报告渲染展示分维度明细（配合 M9），而不只给一个总分；
   4. 确定性兜底：无 LLM 时按维度规则粗估（如方法组合度、gap 信号有无）。
