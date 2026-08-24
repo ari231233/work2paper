@@ -6,7 +6,7 @@ on:
   pull_request:
 
 jobs:
-  smoke:
+  test:
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -16,5 +16,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
+      - name: 安装依赖
+        run: pip install -e ".[dev]"
       - name: 冒烟测试
         run: python -m papermine examples/sample-project
+      - name: 全量测试
+        run: python -m pytest tests/ -q

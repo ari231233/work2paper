@@ -4,8 +4,20 @@
 
 ## [Unreleased]
 
-### Planned
-- Phase 1：Dossier + `LLMProvider`（DeepSeek）+ ① 项目理解 + ② 问题抽象 + 经验库 v1
+## [0.2.0]
+
+### Added
+- 6-Agent 闭环：项目理解 / 问题抽象 / 知识检索 ⇄ 创新点生成 / 可行性评估 / 论文路线规划
+- 编排器（状态机 + 检查点暂停 + 回退）+ `analyze` / `resume` / `status` 子命令
+- 研究档案 Dossier（版本化 + 快照 + 证据溯源）
+- `LLMProvider` 抽象（DeepSeek + `NullProvider` 确定性降级）
+- 文献检索（arXiv + Semantic Scholar，查询改写循环 + 缓存）
+- 自进化层 v2：经验升级为「策略」（结构化 policy + LLM 注入）、effect / 生命周期（candidate→active→degraded→retired）、applicability 门控防污染、跨任务去领域化
+- 147 个单元测试 + CI（pytest 全量 + 冒烟）
+
+### Changed
+- 运行时依赖：新增 `httpx`（首个第三方依赖）
+- 报告：由六元组 + 候选点，升级为研究问题 + 创新点 + 评估 + 路线图
 
 ## [0.1.0]
 
