@@ -111,6 +111,13 @@
 - **根因**：`_render_report_md` 只渲染六段（叙事/问题/创新点/评估/路线图/决策），漏了 literature 段。
 - **教训**：**做了证据却不展示 = 白做**；报告渲染要覆盖所有关键证据源。
 
+### 3.7 产品定位跑偏（Evidence Validation ≠ Experiment Execution）
+
+- **现象**：M12 一开始被设计成「Controlled Experiment Loop」（实验执行闭环：跑 benchmark、改代码、执行实验），偏离了 papermine 的初衷。
+- **根因**：papermine 定位是「帮学生从横向工作里找科研点」，不是「帮学生做实验」；做实验是另一个产品（AutoResearch）。
+- **纠正**：M12 改为「Evidence Validation Agent」——不跑实验，只审查 claim 的证据（类似论文 / 理论依据 / 实验设计支持 / claim 是否过强），输出证据强度 + 理由。
+- **教训**：**功能要围绕核心价值，别让任务膨胀到偏离初衷**。判断标准：新能力是在"验证/审查科研点"（✓ 属于 papermine），还是在"执行科研"（✗ 属于 AutoResearch）。
+
 ---
 
 ## 四、工程与流程
