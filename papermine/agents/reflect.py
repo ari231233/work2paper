@@ -25,7 +25,7 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from .. import experience
+from .. import experience, optimizer
 from ..dossier import Dossier
 from ..llm import LLMError, LLMProvider, SchemaError
 
@@ -367,3 +367,9 @@ def run(dossier: Dossier, llm: LLMProvider) -> None:
 
     for entry in _normalize_entries(raw, dossier):
         experience.append_semantic(entry)
+
+    # M8 v2：把本次 run 的 M12 证据强度（evaluation.evidence_validation）作为 idea 质量信号，
+    # 折入 source_runs 含本次 run 的经验条目（幂等，见 experience.optimize）。
+    evidence_levels = optimizer.evidence_levels_from_evaluations(dossier.evaluations)
+    if evidence_levels:
+        experience.optimize(evidence_by_run={_run_id(dossier): evidence_levels})

@@ -123,8 +123,26 @@ def inject(llm: Any, directives: List[str]) -> Any:
 
 
 def retrieve_for_state(dossier: Dossier, state: str, k: int = 8) -> List[dict]:
-    """编排器入口：按当前任务上下文检索 active 经验，过滤出本状态 target 对应的条目。"""
+    """编排器入口：按当前任务上下文检索 active 经验，过滤出本状态 target 对应的条目。
+
+    M8 v2：对每个**即将注入**的条目记录一次使用（``experience.record_usage``）——
+    注入次数 + 关联 run / idea（当前 dossier 里的 idea refs），供 Policy Optimizer
+    按 usage + effect 自动优化 confidence / 生命周期 / 检索优先级。
+    """
     context = build_context(dossier)
     entries = experience.retrieve(context, k=k)
     targets = set(targets_for_state(state))
-    return [e for e in entries if e.get("policy", {}).get("target") in targets]
+    matched = [e for e in entries if e.get("policy", {}).get("target") in targets]
+
+    # 记录使用：每次被注入某 Agent 即记一次（M8 v2 要点 1）
+    run_id = (dossier.meta or {}).get("run_id") if isinstance(dossier.meta, dict) else None
+    idea_refs = [
+        str(i.get("idea_id"))
+        for i in (dossier.ideas or [])
+        if isinstance(i, dict) and i.get("idea_id")
+    ]
+    for e in matched:
+        experience.record_usage(
+            e.get("experience_id"), run_id=run_id, idea_refs=idea_refs)
+
+    return matched

@@ -1,6 +1,6 @@
-"""经验库：跨项目记忆（Evolution Layer 的数据层）——M8 升级为「策略」版。
+"""经验库：跨项目记忆（Evolution Layer 的数据层）——M8 升级为「策略」版，M8 v2 增加「自动优化」。
 
-对应 docs/architecture.md §3.6 / §3.7 与 docs/build-plan.md §4 M8：
+对应 docs/architecture.md §3.6 / §3.7 与 docs/build-plan.md §4 M8 / M8 v2：
 
 - 三种记忆文件（JSONL，append-only，位于 ``~/.papermine/experience/``）：
   - ``episodic.jsonl``     案例记忆（人类检查点决策 + 运行摘要，F1 反馈源）。
@@ -13,14 +13,24 @@
 - 去重键：``principle + applicability``（旧为 ``scope + insight``）。
 - 检索注入（M1）：按 ``applicability`` 门控（不覆盖当前任务不注入），只返回 ``active``。
 - 生命周期 ``candidate -> active -> degraded -> retired``，由 ``support_count + effect`` 驱动：
-  - 晋升：``support_count >= PROMOTE_THRESHOLD`` 且（人工确认 或 ``effect.outcome == positive``）。
-  - 降级：``effect.outcome == negative`` 累积 -> confidence 下降 -> ``degraded``。
+  - 晋升：``support_count >= PROMOTE_THRESHOLD`` 且（人工确认 或 ``effect.outcome == positive``）；
+  - 降级：``effect.outcome == negative`` 累积 -> confidence 下降 -> ``degraded``；
   - 退役：``retire()`` 后不参与注入，保留审计。
+- **M8 v2 Policy Optimizer**：把 policy 从「被动更新」升级为「自动优化」（详见 ``papermine/optimizer.py``）：
+  - ``usage``（注入次数 + 关联 run/idea）：``record_usage()`` 记录，作为「被使用」的弱信号；
+  - ``record_effect()`` / ``optimize()``：按 usage + effect（含 M12 evidence 强度）自动调
+    confidence（升/降）、推进生命周期、重算检索注入优先级（``priority``）；
+  - 防漂移：阈值门槛见 ``optimizer.py``（单步封顶、累计信号达标才迁移）。
 
 冻结接口（docs/build-plan.md §4 M7，M8 依据 delta 更新 ``retrieve``）：
 
     def record_decision(run_id, checkpoint, decision, note) -> None
     def retrieve(applicability: dict, k: int = 3) -> list[dict]   # scope -> applicability 门控
+
+M8 v2 新增公开接口（不改既有签名）：
+
+    def record_usage(experience_id, run_id=None, idea_refs=None) -> Optional[str]
+    def optimize(experience_id=None, evidence_by_run=None) -> dict
 """
 from __future__ import annotations
 
@@ -31,7 +41,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from . import storage
+from . import optimizer, storage
 
 __all__ = [
     "PROMOTE_THRESHOLD",
@@ -46,6 +56,8 @@ __all__ = [
     "record_decision",
     "retrieve",
     "record_effect",
+    "record_usage",
+    "optimize",
     "retire",
     "append_semantic",
     "read_semantic",
@@ -60,12 +72,10 @@ EPISODIC_FILENAME = "episodic.jsonl"
 SEMANTIC_FILENAME = "semantic.jsonl"
 CALIBRATION_FILENAME = "calibration.jsonl"
 
-# 晋升门槛：support_count 达到该值即具备晋升资格（还需人工确认 或 effect positive）
-PROMOTE_THRESHOLD = 2
-
-# 降级阈值与步长（由 effect.outcome=negative 累积驱动，见 §3.7）
-DEGRADE_CONFIDENCE_FLOOR = 0.3
-CONFIDENCE_STEP = 0.25
+# 阈值与步长：唯一事实源 = optimizer.py（此处导出保持 M8 既有公开名不变）
+PROMOTE_THRESHOLD = optimizer.PROMOTE_SUPPORT_THRESHOLD
+DEGRADE_CONFIDENCE_FLOOR = optimizer.DEGRADE_CONFIDENCE_THRESHOLD
+CONFIDENCE_STEP = optimizer.CONFIDENCE_STEP
 
 # policy.target 的合法取值（architecture §3.1 / §3.6：四个行为环节）
 TARGETS = ("prompt", "planning", "search", "evaluation")
@@ -75,10 +85,13 @@ OUTCOMES = ("positive", "neutral", "negative")
 STATUSES = ("candidate", "active", "degraded", "retired")
 
 # 语义条目逻辑键（与 architecture §3.6 对齐；``type`` 为内部实现字段）
+# M8 v2 新增：usage（注入次数 + 关联 run/idea）、priority（检索注入优先级）、
+# negative_count（连续负信号计数，驱动退役）、evidence_runs（已折入 M12 evidence 的 run，幂等）。
 _SEMANTIC_KEYS = (
     "experience_id", "type", "source_domain", "applicability", "principle",
     "policy", "effect", "confidence", "support_count", "status",
-    "source_runs", "created_at", "updated_at",
+    "source_runs", "usage", "priority", "negative_count", "evidence_runs",
+    "created_at", "updated_at",
 )
 
 
@@ -167,6 +180,21 @@ def _normalize_effect(value: Any) -> Optional[Dict[str, Any]]:
     }
 
 
+def _normalize_usage(value: Any) -> Dict[str, Any]:
+    """规范化 usage：``{injections: int, runs: [...], ideas: [...]}``（M8 v2 记录使用）。"""
+    u = value if isinstance(value, dict) else {}
+    injections = 0
+    try:
+        injections = max(0, int(u.get("injections") or 0))
+    except (TypeError, ValueError):
+        injections = 0
+    return {
+        "injections": injections,
+        "runs": _dedup(u.get("runs")),
+        "ideas": _dedup(u.get("ideas")),
+    }
+
+
 def _normalize_semantic(entry: Dict[str, Any]) -> Dict[str, Any]:
     """补齐语义条目字段并做类型归一 + 旧字段迁移（缺省值兜底）。"""
     now = _now()
@@ -194,7 +222,13 @@ def _normalize_semantic(entry: Dict[str, Any]) -> Dict[str, Any]:
     if status not in STATUSES:
         status = "candidate"
 
-    return {
+    negative_count = 0
+    try:
+        negative_count = max(0, int(entry.get("negative_count") or 0))
+    except (TypeError, ValueError):
+        negative_count = 0
+
+    normalized = {
         "experience_id": _norm(entry.get("experience_id")) or new_experience_id(),
         "type": _norm(entry.get("type")) or "pattern",
         "source_domain": _norm(entry.get("source_domain")) or "*",
@@ -206,9 +240,15 @@ def _normalize_semantic(entry: Dict[str, Any]) -> Dict[str, Any]:
         "support_count": int(entry.get("support_count") or 0),
         "status": status,
         "source_runs": _dedup(entry.get("source_runs")),
+        "usage": _normalize_usage(entry.get("usage")),
+        "negative_count": negative_count,
+        "evidence_runs": _dedup(entry.get("evidence_runs")),
         "created_at": _norm(entry.get("created_at")) or now,
         "updated_at": _norm(entry.get("updated_at")) or now,
     }
+    # 检索注入优先级为派生字段：读取时统一重算，保证与 confidence/support/usage/effect 一致。
+    normalized["priority"] = optimizer.priority_score(normalized)
+    return normalized
 
 
 def _dedup_key(entry: Dict[str, Any]) -> tuple:
@@ -310,20 +350,17 @@ def _effect_outcome(entry: Dict[str, Any]) -> Optional[str]:
 
 
 def _apply_lifecycle(entry: Dict[str, Any]) -> None:
-    """由 support_count + effect 重算 status（retired 终态不动）。
+    """由 usage + effect + confidence 重算 status（M8 v2，委托 ``optimizer.recompute_lifecycle``）。
 
-    - 降级：effect.outcome == negative 且 confidence <= 阈值 -> degraded；
+    - 降级：effect.outcome == negative（或存在负信号）且 confidence <= 阈值 -> degraded；
     - 晋升：effect.outcome == positive 且 support_count >= 阈值 -> active；
+      usage 达标且 confidence 达标 -> candidate 自动晋升 active（M8 v2 自动优化）；
+    - 退役：连续负信号达标且 confidence 跌破阈值 -> retired；
     - 其余保持现状（不自动从 active/candidate 互跳）。
     """
-    if entry.get("status") == "retired":
-        return
-    outcome = _effect_outcome(entry)
-    if outcome == "negative" and _coerce_confidence(entry.get("confidence")) <= DEGRADE_CONFIDENCE_FLOOR:
-        entry["status"] = "degraded"
-        entry["updated_at"] = _now()
-    elif outcome == "positive" and _support(entry) >= PROMOTE_THRESHOLD and entry.get("status") == "candidate":
-        entry["status"] = "active"
+    new_status = optimizer.recompute_lifecycle(entry)
+    if new_status != entry.get("status"):
+        entry["status"] = new_status
         entry["updated_at"] = _now()
 
 
@@ -375,6 +412,7 @@ def append_semantic(entry: Dict[str, Any]) -> str:
         if entry.get("status") == "active":
             e["status"] = "active"
         _apply_lifecycle(e)
+        e["priority"] = optimizer.priority_score(e)
         _write_jsonl(_path(SEMANTIC_FILENAME), existing)
         return str(e.get("experience_id"))
 
@@ -413,7 +451,9 @@ def _promote_by_run(run_id: str) -> None:
                 "note": "检查点人工确认（F1）",
                 "updated_at": _now(),
             }
+            e["negative_count"] = 0   # 正信号清零连负计数
         _apply_lifecycle(e)
+        e["priority"] = optimizer.priority_score(e)
         changed = True
     if changed:
         _write_jsonl(_path(SEMANTIC_FILENAME), entries)
@@ -421,11 +461,12 @@ def _promote_by_run(run_id: str) -> None:
 
 def record_effect(experience_id: str, outcome: str,
                   measured_by: str = "human_review", note: str = "") -> Optional[str]:
-    """记录一条经验的效果（F3 结果信号，落点为 ``effect``），并驱动生命周期。
+    """记录一条经验的效果（F3 结果信号，落点为 ``effect``），并驱动生命周期（M8 v2 自动优化）。
 
-    - positive：confidence +CONFIDENCE_STEP；candidate 且 support_count 达标 -> active。
-    - negative：confidence -CONFIDENCE_STEP；跌破阈值 -> degraded。
+    - positive：confidence +CONFIDENCE_STEP、清零连负计数；candidate 且 support_count 达标 -> active。
+    - negative：confidence -CONFIDENCE_STEP、连负计数 +1；跌破阈值 -> degraded；连负达标 -> retired。
     - neutral：仅更新 effect，不动 confidence / status。
+    - 每次更新后重算检索注入优先级（``priority``）。
     找不到 experience_id 时返回 None。
     """
     outcome = _norm(outcome)
@@ -444,10 +485,13 @@ def record_effect(experience_id: str, outcome: str,
         conf = _coerce_confidence(e.get("confidence"))
         if outcome == "positive":
             conf = round(min(1.0, conf + CONFIDENCE_STEP), 2)
+            e["negative_count"] = 0
         elif outcome == "negative":
             conf = round(max(0.0, conf - CONFIDENCE_STEP), 2)
+            e["negative_count"] = int(e.get("negative_count") or 0) + 1
         e["confidence"] = conf
         _apply_lifecycle(e)
+        e["priority"] = optimizer.priority_score(e)
         _write_jsonl(_path(SEMANTIC_FILENAME), entries)
         return str(e["experience_id"])
     return None
@@ -466,9 +510,90 @@ def retire(experience_id: str, note: str = "") -> Optional[str]:
             eff["note"] = "; ".join(x for x in (_norm(eff.get("note")), _norm(note)) if x)
             eff["updated_at"] = _now()
             e["effect"] = eff
+        e["priority"] = optimizer.priority_score(e)
         _write_jsonl(_path(SEMANTIC_FILENAME), entries)
         return str(e["experience_id"])
     return None
+
+
+# ---------------------------------------------------------------------------
+# M8 v2：记录使用 + 自动优化
+# ---------------------------------------------------------------------------
+
+def record_usage(experience_id: str, run_id: Optional[str] = None,
+                 idea_refs: Optional[List[str]] = None) -> Optional[str]:
+    """记录一次 policy 注入使用（M8 v2 要点 1），写 ``usage`` 字段。
+
+    - ``usage.injections`` 自增（注入次数）；
+    - ``usage.runs`` / ``usage.ideas`` 追加去重（关联 run / idea）；
+    - 使用本身是弱信号：**不直接改 confidence**（防漂移），但会重算优先级，并可能触发
+      usage 驱动的 candidate -> active 自动晋升（``optimizer.PROMOTE_USAGE_THRESHOLD``）。
+    找不到 experience_id 时返回 None。
+    """
+    entries = read_semantic()
+    for e in entries:
+        if str(e.get("experience_id")) != str(experience_id):
+            continue
+        usage = dict(e.get("usage") or {})
+        usage["injections"] = _normalize_usage(e.get("usage"))["injections"] + 1
+        usage["runs"] = _dedup(list(usage.get("runs") or []) + ([str(run_id)] if run_id else []))
+        usage["ideas"] = _dedup(
+            list(usage.get("ideas") or []) + [str(i) for i in (idea_refs or [])])
+        e["usage"] = usage
+        e["updated_at"] = _now()
+        _apply_lifecycle(e)          # usage 达标可能触发自动晋升
+        e["priority"] = optimizer.priority_score(e)
+        _write_jsonl(_path(SEMANTIC_FILENAME), entries)
+        return str(e["experience_id"])
+    return None
+
+
+def optimize(experience_id: Optional[str] = None,
+             evidence_by_run: Optional[Dict[str, List[str]]] = None) -> Dict[str, Any]:
+    """按 usage + effect（+ M12 evidence 强度）自动优化经验条目（M8 v2 要点 3 / 4）。
+
+    - ``evidence_by_run``：``{run_id: [evidence_level, ...]}``，把该 run 的 idea 证据强度
+      （weak/medium/strong，来自 M12 ``evaluation.evidence_validation``）折入 ``source_runs``
+      含该 run 的条目；已折入的 run 记入 ``evidence_runs``，**幂等**（同一 run 不重复折入）。
+    - ``experience_id`` 非空时只优化该条目；否则优化全部。
+    - 置信度单步封顶、生命周期迁移需累计信号达标（防漂移护栏见 ``optimizer.py``）。
+    返回 ``{"optimized": int, "changes": [...]}`` 变更摘要。
+    """
+    evidence_by_run = dict(evidence_by_run or {})
+    entries = read_semantic()
+    summary: Dict[str, Any] = {"optimized": 0, "changes": []}
+    dirty = False
+    for e in entries:
+        if experience_id and str(e.get("experience_id")) != str(experience_id):
+            continue
+        source_runs = [str(r) for r in (e.get("source_runs") or [])]
+        evidence_runs = set(str(r) for r in (e.get("evidence_runs") or []))
+        levels: List[str] = []
+        newly_applied: List[str] = []
+        for run_id, run_levels in evidence_by_run.items():
+            if str(run_id) not in source_runs or str(run_id) in evidence_runs:
+                continue
+            levels.extend(run_levels)
+            newly_applied.append(str(run_id))
+
+        optimized, changes = optimizer.optimize(e, evidence_levels=levels or None)
+        if newly_applied:
+            optimized["evidence_runs"] = _dedup(list(evidence_runs) + newly_applied)
+            dirty = True          # 记录已折入的 run，即使本次 confidence 未变
+        if changes:
+            optimized["updated_at"] = _now()
+            for c in changes:
+                summary["changes"].append(
+                    {"experience_id": optimized.get("experience_id"), **c})
+            summary["optimized"] += 1
+            dirty = True
+        # 写回（含 evidence_runs / priority / confidence / status 变化）
+        e.clear()
+        e.update(optimized)
+
+    if dirty:
+        _write_jsonl(_path(SEMANTIC_FILENAME), entries)
+    return summary
 
 
 # ---------------------------------------------------------------------------
@@ -506,7 +631,9 @@ def retrieve(applicability: Optional[Dict[str, Any]] = None, k: int = 3) -> List
     - 只返回 ``status == active`` 的条目（candidate / degraded / retired 均不注入，防污染）；
     - ``applicability`` 为当前任务上下文 ``{"domains"/"task_types"/"preconditions"}``；
       不覆盖的条目不命中；``None`` 视为无上下文约束（命中全部 active）。
-    - 排序：confidence 降序、support_count 降序。
+    - 排序：检索注入优先级 ``priority`` 降序（M8 v2：priority = confidence + usage/support/effect
+      加权，confidence 主导、usage/effect 打破平局并体现「被使用且有效」更靠前）；
+      平局时再按 confidence / support_count 降序兜底，保证确定性。
     """
     k = int(k) if k is not None else 3
     if k <= 0:
@@ -516,6 +643,7 @@ def retrieve(applicability: Optional[Dict[str, Any]] = None, k: int = 3) -> List
         if e.get("status") == "active" and _applicability_matches(e.get("applicability"), applicability)
     ]
     entries.sort(key=lambda e: (
+        -optimizer.priority_score(e),
         -_coerce_confidence(e.get("confidence")),
         -int(e.get("support_count") or 0),
     ))
