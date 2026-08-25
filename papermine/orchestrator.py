@@ -12,7 +12,10 @@
 - **每状态迁移后 ``dossier.snapshot()``**（append-only 历史，可回滚）；
 - ⑦ 在 DONE 前执行一次，把本次运行蒸馏成经验条目写入经验库；
 - **M8 混合注入**：每个状态执行前按 applicability 门控检索 active 经验，把命中条目里的
-  ``policy.directive`` 渲染成该状态对应 Agent 的行为准则注入其 system prompt（结构决定位置，LLM 执行约束）。
+  ``policy.directive`` 渲染成该状态对应 Agent 的行为准则注入其 system prompt（结构决定位置，LLM 执行约束）；
+- **M14 减少无效调用**：① 工作流固化——「检索→文献理解→矛盾挖掘」只跑一次，回炉复用结果、
+  只重跑④生成；② 动态路由——按评估证据强度决定是否回炉、回炉到哪一步，数据缺口不再自动回炉
+  （消除 trace 里 IDEATE/EVALUATE/ABSTRACT/PLAN 各跑 4 次的回炉循环）。
 
 冻结接口（docs/build-plan.md §4 M7，M8 增量见同节 M8）：
 
@@ -22,6 +25,7 @@
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import sys
 import time
@@ -81,6 +85,12 @@ _ROLLBACK_TARGET = {
 # 每个检查点回退的最大轮数（超限降级为前进，防死循环）
 MAX_ROLLBACK_ROUNDS = 3
 
+# M14：评估证据弱时自动回炉到④细化 claim 的最大轮数（只允许 1 次，避免再次陷入回炉循环）
+MAX_AUTO_REWORK_ROUNDS = 1
+
+# M14：窄回炉（只重跑④创新点生成、复用已固化文献基础）的 trace span 名
+IDEATE_GENERATE_STAGE = "IDEATE_GENERATE"
+
 # 运行状态文件（供 resume / status）
 STATE_FILE = "run_state.json"
 STATE_SCHEMA = "run_state"
@@ -135,6 +145,9 @@ def _load_state(run_dir: Path) -> Dict[str, Any]:
     data.pop("_schema_version", None)
     data.setdefault("rollback_rounds", {})
     data.setdefault("degradations", 0)
+    # M14：工作流固化状态（旧 run_state 缺字段时补默认，向后兼容）
+    data.setdefault("literature_fixed", False)
+    data.setdefault("literature_key", "")
     return data
 
 
@@ -146,6 +159,9 @@ def _new_state(run_id: str, project_dir: str, auto: bool) -> Dict[str, Any]:
         "auto": bool(auto),
         "rollback_rounds": {},
         "degradations": 0,
+        # M14：工作流固化（检索→理解→挖掘只跑一次，回炉复用）
+        "literature_fixed": False,
+        "literature_key": "",
         "updated_at": _now_iso(),
     }
 
@@ -216,6 +232,68 @@ def _process_signals(state: Dict[str, Any]) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# M14：动态 Agent 路由（方向②）——按评估证据强度决定是否回炉、回炉到哪一步
+# ---------------------------------------------------------------------------
+
+def _has_literature_papers(dossier: Dossier) -> bool:
+    """是否检索到了真实论文（离线 / 无结果时无法靠重跑生成来强化证据）。"""
+    return any(
+        isinstance(e, dict) and (e.get("papers") or [])
+        for e in (dossier.literature or [])
+    )
+
+
+def _weak_evidence_rework(dossier: Dossier) -> bool:
+    """是否存在「证据弱且 verdict=rework」的评估（M12：weak → 回④细化 claim）。"""
+    for ev in dossier.evaluations or []:
+        if not isinstance(ev, dict):
+            continue
+        if ev.get("verdict") == "rework":
+            evv = ev.get("evidence_validation")
+            if isinstance(evv, dict) and evv.get("evidence") == "weak":
+                return True
+    return False
+
+
+def _low_data_feasibility(dossier: Dossier) -> bool:
+    """是否存在「数据可得性低且 verdict=rework」的评估（需回①回填数据）。"""
+    for ev in dossier.evaluations or []:
+        if not isinstance(ev, dict):
+            continue
+        if ev.get("verdict") == "rework" and ev.get("data_feasibility") == "low":
+            return True
+    return False
+
+
+def _evaluation_rework_target(dossier: Dossier) -> Optional[str]:
+    """按评估证据强度动态决定是否**自动**回炉（M14 方向②）。
+
+    - 证据弱 + 有文献可对拍 → ``"IDEATE"``（回④细化 claim，复用文献基础、只重跑生成）；
+    - 证据强 / proceed / drop，或无文献（离线）→ ``None``（**不强制回炉**，避免无效循环）。
+    """
+    if _weak_evidence_rework(dossier) and _has_literature_papers(dossier):
+        return "IDEATE"
+    return None
+
+
+def _route_rework(checkpoint: str, dossier: Dossier) -> str:
+    """人工检查点 rework 时的窄回炉目标（M14 方向②：回炉只重跑受影响环节）。
+
+    - cp4（评估不接受）：证据弱 → ④（IDEATE，复用文献）；数据缺口 → ①（UNDERSTAND 回填）；
+      其余 → ④（IDEATE，复用文献）；
+    - cp3（创新点不认可）→ ④（IDEATE，复用文献）；
+    - 其余沿用 ``_ROLLBACK_TARGET``。
+    """
+    if checkpoint == "cp4":
+        if _low_data_feasibility(dossier):
+            return "UNDERSTAND"
+        return "IDEATE"
+    if checkpoint == "cp3":
+        return "IDEATE"
+    return _ROLLBACK_TARGET.get(checkpoint, "UNDERSTAND")
+
+
+# ---------------------------------------------------------------------------
 # 状态机执行
 # ---------------------------------------------------------------------------
 
@@ -250,11 +328,53 @@ def _call_agent(name: str, project_dir: str, dossier: Dossier, llm: Any) -> None
         reflect.run(dossier, llm)
 
 
+def _problems_key(problems: List[dict]) -> str:
+    """problems 的稳定签名（title + formulation 的 sha1 摘要），M14 方向①。
+
+    用于判断「检索→理解→挖掘」结果是否还能复用：problems 不变 → 文献基础有效；
+    problems 变化（如回炉到②重新抽象）→ 缓存失效，需重新检索。
+    """
+    items = []
+    for p in problems or []:
+        if isinstance(p, dict):
+            items.append("\u0001".join([
+                " ".join(str(p.get("title") or "").split()),
+                " ".join(str(p.get("formulation") or "").split()),
+            ]))
+    return hashlib.sha1("\u0002".join(items).encode("utf-8")).hexdigest()
+
+
+def _literature_foundation_fixed(state: Dict[str, Any], dossier: Dossier) -> bool:
+    """「检索→理解→挖掘」基础是否已固化且仍有效（problems 未变化）。"""
+    return bool(state.get("literature_fixed")) and \
+        state.get("literature_key") == _problems_key(dossier.problems)
+
+
+def _regenerate_ideas(dossier: Dossier, llm: Any) -> None:
+    """只重跑 ④ 创新点生成，复用已固化的检索/理解/挖掘结果（M14 方向①）。
+
+    等价于 ``ideate.run`` 的尾部（跳过 ``search_literature`` + ``analyze_literature``）：
+    不新开检索、不重跑文献理解/矛盾挖掘，只基于现有 ``dossier.literature`` 重新生成 ideas。
+    """
+    problems = list(dossier.problems or [])
+    facts = dict((dossier.assets or {}).get("facts") or {})
+    version, system = ideate._load_prompt()
+    dossier.ideas = ideate._generate_ideas(problems, dossier.literature, facts, llm, system)
+    dossier.meta.setdefault("prompt_versions", {})["ideate"] = version
+
+
 def _run_state(name: str, project_dir: str, dossier: Dossier, llm: Any,
-               recorder: Any = None) -> None:
-    """执行一个状态（一次 Agent 调用），并用 M13 trace 包裹记录起止/耗时。"""
+               state: Dict[str, Any], recorder: Any = None) -> None:
+    """执行一个状态（一次 Agent 调用），并用 M13 trace 包裹记录起止/耗时。
+
+    M14：``IDEATE`` 特殊处理——首次完整跑「检索→理解→挖掘→生成」并固化基础；
+    回炉时复用基础、只重跑④生成（见 ``_run_ideate_state``）。
+    """
     llm = _injected_llm(llm, dossier, name)
     recorder = recorder if recorder is not None else trace.current_recorder()
+    if name == "IDEATE":
+        _run_ideate_state(project_dir, dossier, llm, state, recorder)
+        return
     if recorder is None:
         _call_agent(name, project_dir, dossier, llm)
         return
@@ -262,11 +382,38 @@ def _run_state(name: str, project_dir: str, dossier: Dossier, llm: Any,
         _call_agent(name, project_dir, dossier, llm)
 
 
+def _run_ideate_state(project_dir: str, dossier: Dossier, llm: Any,
+                      state: Dict[str, Any], recorder: Any) -> None:
+    """执行 IDEATE（③检索⇄④生成），带 M14 工作流固化。
+
+    - 首次（或 problems 变化）：完整跑 ``ideate.run``（检索→理解→挖掘→生成），固化基础；
+    - 回炉（problems 未变）：复用基础，只重跑④创新点生成，用独立 span 名标注（``IDEATE_GENERATE``），
+      使 ``papermine trace`` 能看到「检索类 IDEATE 只跑一次、生成类窄回炉单独计次」。
+    """
+    if _literature_foundation_fixed(state, dossier):
+        _log("复用已固化文献基础，仅重跑④创新点生成（M14 方向①）")
+        if recorder is None:
+            _regenerate_ideas(dossier, llm)
+        else:
+            with recorder.agent_span(IDEATE_GENERATE_STAGE, "④ 创新点生成（回炉，复用文献基础）"):
+                _regenerate_ideas(dossier, llm)
+        return
+
+    if recorder is None:
+        ideate.run(dossier, llm)
+    else:
+        with recorder.agent_span("IDEATE"):
+            ideate.run(dossier, llm)
+    state["literature_fixed"] = True
+    state["literature_key"] = _problems_key(dossier.problems)
+
+
 def _execute(run_dir: Path, project_dir: str, dossier: Dossier, llm: Any,
              state: Dict[str, Any], recorder: Any = None) -> None:
     """跑状态机直到 DONE（或从 resume 处的状态继续）。
 
     M13：``recorder`` 记录每个 Agent 的起止/耗时，并记录回炉 / 降级 / 超时等异常信号。
+    M14：评估后按证据强度窄回炉（弱证据→④），PLAN 数据缺口不自动回炉。
     """
     while True:
         cur = state.get("state", "UNDERSTAND")
@@ -277,22 +424,35 @@ def _execute(run_dir: Path, project_dir: str, dossier: Dossier, llm: Any,
             _log("执行状态：{}".format(_STATE_LABELS[cur]))
             if cur == "REFLECT":
                 dossier.meta["process_signals"] = _process_signals(state)
-            _run_state(cur, project_dir, dossier, llm, recorder)
+            _run_state(cur, project_dir, dossier, llm, state, recorder)
             _commit(dossier, run_dir)
 
-            if cur == "PLAN" and _has_data_gap(dossier.roadmap):
-                if _rollback("plan_missing", state):
-                    _log("路线图存在数据缺口 → 自动回退到 UNDERSTAND（回填项目事实）")
+            if cur == "EVALUATE":
+                # M14 方向②：按证据强度自动决定是否回炉——弱证据 + 有文献 → 回④细化 claim；
+                # 强证据 / proceed / drop → 不强制回炉，避免无效循环。预算 1 轮。
+                target = _evaluation_rework_target(dossier)
+                rounds = state.setdefault("rollback_rounds", {})
+                if target and state.get("auto") and \
+                        int(rounds.get("auto_evidence", 0)) < MAX_AUTO_REWORK_ROUNDS:
+                    rounds["auto_evidence"] = int(rounds.get("auto_evidence", 0)) + 1
+                    _log("评估发现证据弱 → 回炉到④细化 claim（复用文献基础）")
                     if recorder is not None:
-                        recorder.signal("rollback", "路线图数据缺口 → 回退到 UNDERSTAND（回填项目事实）",
-                                        stage=cur)
-                    state["state"] = "UNDERSTAND"
+                        recorder.signal("rollback",
+                                        "证据弱 → 回炉到④细化 claim（复用文献基础）", stage=cur)
+                    state["state"] = target
                 else:
-                    _log("缺口回退轮数超限，降级前进")
+                    state["state"] = _advance(cur)
+            elif cur == "PLAN":
+                # M14：数据缺口不再自动回炉到①（确定性扫描无法自动采集数据，属无效循环），
+                # 改为记一次降级信号，把缺口留在 roadmap.missing_items 交给人工回填。
+                if _has_data_gap(dossier.roadmap):
+                    _log("路线图存在数据缺口：不自动回炉，缺口留在 missing_items 交人工回填")
                     state["degradations"] = int(state.get("degradations") or 0) + 1
                     if recorder is not None:
-                        recorder.signal("degradation", "缺口回退轮数超限，降级前进", stage=cur)
-                    state["state"] = _advance(cur)
+                        recorder.signal("degradation",
+                                        "路线图存在数据缺口：不自动回炉，缺口留在 missing_items 交人工回填",
+                                        stage=cur)
+                state["state"] = _advance(cur)
             else:
                 state["state"] = _advance(cur)
             _save_state(run_dir, state)
@@ -314,7 +474,7 @@ def _execute(run_dir: Path, project_dir: str, dossier: Dossier, llm: Any,
             _commit(dossier, run_dir)
 
             if decision == "rework":
-                target = _ROLLBACK_TARGET[cur]
+                target = _route_rework(cur, dossier)
                 if _rollback(cur, state):
                     _log("检查点 {} 决策 rework → 回退到 {}".format(cur, target))
                     if recorder is not None:
