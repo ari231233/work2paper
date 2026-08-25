@@ -278,6 +278,17 @@ def run(dossier: Dossier, llm: LLMProvider) -> None
 - **要点**：每个 query 展示 query、命中论文（标题 + venue + 年份）、gap_note、来源；无文献时标"离线/无结果"。
 - **验收**：`report.md` 含「文献检索结果」段，能看到 papers 标题与 gap_note。
 
+### M9 v2 — 报告渲染 M5 v2 新字段（文献理解/矛盾图/假设）
+
+- **目标**：`_render_report_md` 增加 M5 v2 新产出的渲染，让「挖到了什么矛盾、生成了什么假设」在报告里可见（现在这些只在 dossier 里、报告不展示）。
+- **前置**：M9（报告渲染补文献段）+ M5 v2（产出 `understanding` / `contradiction_graph` / `hypotheses`）。
+- **产出**：修改 `papermine/orchestrator.py` 的 `_render_report_md`。
+- **要点**：
+  1. 文献检索结果段：每篇论文附带其 `understanding`（claim / 方法 / 结论 / 适用条件）。
+  2. 新增「矛盾 / 缺口」段：渲染 `contradiction_graph`（哪些论文在哪一点冲突、gap 在哪）。
+  3. 新增「假设」段：渲染 `hypotheses`（可证伪 if-then 假设），并标注哪些 idea 由哪些假设而来。
+- **验收**：`report.md` 能看到文献理解、矛盾/缺口、假设三段；idea 与假设的关联可追溯。
+
 ### M10 — 检索相关性优化
 
 - **目标**：提高检索返回论文的相关性（当前英文 query 太泛，检回 *Byzantine SGD*、*dark energy* 等无关论文）。
