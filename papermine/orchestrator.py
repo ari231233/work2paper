@@ -28,7 +28,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from . import experience, policy, storage
+from . import experience, policy, storage, trace
 from .agents import abstract, evaluate, ideate, plan, reflect, understand
 from .dossier import Dossier
 from .llm import NullProvider, get_provider
@@ -234,8 +234,8 @@ def _injected_llm(llm: Any, dossier: Dossier, state: str) -> Any:
     return policy.inject(llm, directives)
 
 
-def _run_state(name: str, project_dir: str, dossier: Dossier, llm: Any) -> None:
-    llm = _injected_llm(llm, dossier, name)
+def _call_agent(name: str, project_dir: str, dossier: Dossier, llm: Any) -> None:
+    """按状态名调用对应 Agent 的 ``run()``（冻结契约 §3.3，签名不变）。"""
     if name == "UNDERSTAND":
         understand.run(project_dir, dossier, llm)
     elif name == "ABSTRACT":
@@ -250,9 +250,24 @@ def _run_state(name: str, project_dir: str, dossier: Dossier, llm: Any) -> None:
         reflect.run(dossier, llm)
 
 
+def _run_state(name: str, project_dir: str, dossier: Dossier, llm: Any,
+               recorder: Any = None) -> None:
+    """执行一个状态（一次 Agent 调用），并用 M13 trace 包裹记录起止/耗时。"""
+    llm = _injected_llm(llm, dossier, name)
+    recorder = recorder if recorder is not None else trace.current_recorder()
+    if recorder is None:
+        _call_agent(name, project_dir, dossier, llm)
+        return
+    with recorder.agent_span(name):
+        _call_agent(name, project_dir, dossier, llm)
+
+
 def _execute(run_dir: Path, project_dir: str, dossier: Dossier, llm: Any,
-             state: Dict[str, Any]) -> None:
-    """跑状态机直到 DONE（或从 resume 处的状态继续）。"""
+             state: Dict[str, Any], recorder: Any = None) -> None:
+    """跑状态机直到 DONE（或从 resume 处的状态继续）。
+
+    M13：``recorder`` 记录每个 Agent 的起止/耗时，并记录回炉 / 降级 / 超时等异常信号。
+    """
     while True:
         cur = state.get("state", "UNDERSTAND")
         if cur == "DONE":
@@ -262,16 +277,21 @@ def _execute(run_dir: Path, project_dir: str, dossier: Dossier, llm: Any,
             _log("执行状态：{}".format(_STATE_LABELS[cur]))
             if cur == "REFLECT":
                 dossier.meta["process_signals"] = _process_signals(state)
-            _run_state(cur, project_dir, dossier, llm)
+            _run_state(cur, project_dir, dossier, llm, recorder)
             _commit(dossier, run_dir)
 
             if cur == "PLAN" and _has_data_gap(dossier.roadmap):
                 if _rollback("plan_missing", state):
                     _log("路线图存在数据缺口 → 自动回退到 UNDERSTAND（回填项目事实）")
+                    if recorder is not None:
+                        recorder.signal("rollback", "路线图数据缺口 → 回退到 UNDERSTAND（回填项目事实）",
+                                        stage=cur)
                     state["state"] = "UNDERSTAND"
                 else:
                     _log("缺口回退轮数超限，降级前进")
                     state["degradations"] = int(state.get("degradations") or 0) + 1
+                    if recorder is not None:
+                        recorder.signal("degradation", "缺口回退轮数超限，降级前进", stage=cur)
                     state["state"] = _advance(cur)
             else:
                 state["state"] = _advance(cur)
@@ -297,10 +317,18 @@ def _execute(run_dir: Path, project_dir: str, dossier: Dossier, llm: Any,
                 target = _ROLLBACK_TARGET[cur]
                 if _rollback(cur, state):
                     _log("检查点 {} 决策 rework → 回退到 {}".format(cur, target))
+                    if recorder is not None:
+                        recorder.signal("rollback",
+                                        "检查点 {} 决策 rework → 回退到 {}".format(cur, target),
+                                        stage=cur)
                     state["state"] = target
                 else:
                     _log("检查点 {} 回退轮数超限，降级前进".format(cur))
                     state["degradations"] = int(state.get("degradations") or 0) + 1
+                    if recorder is not None:
+                        recorder.signal("degradation",
+                                        "检查点 {} 回退轮数超限，降级前进".format(cur),
+                                        stage=cur)
                     state["state"] = _advance(cur)
             else:
                 state["state"] = _advance(cur)
@@ -620,8 +648,14 @@ def run_pipeline(project_dir: str, auto: bool = False) -> str:
     state = _new_state(run_id, project_dir, auto)
     _save_state(run_dir, state)
 
+    # M13：绑定 run 轨迹记录器 + 包 LLM（记录每次调用耗时）+ 挂 HTTP 检索 transport。
+    recorder = trace.TraceRecorder(run_dir)
+    trace.enable_http_tracing()
+    llm = trace.wrap_llm(llm, recorder)
+
     try:
-        _execute(run_dir, project_dir, dossier, llm, state)
+        with recorder:
+            _execute(run_dir, project_dir, dossier, llm, state, recorder)
     finally:
         # 兜底落盘：异常 / 中断也能续跑
         dossier.save(run_dir)
@@ -649,8 +683,14 @@ def resume(run_id: str, auto: bool = False) -> str:
     dossier.meta["run_id"] = run_id
     llm = get_provider()
 
+    # M13：续跑也向同一 trace.jsonl 追加轨迹事件。
+    recorder = trace.TraceRecorder(run_dir)
+    trace.enable_http_tracing()
+    llm = trace.wrap_llm(llm, recorder)
+
     try:
-        _execute(run_dir, project_dir, dossier, llm, state)
+        with recorder:
+            _execute(run_dir, project_dir, dossier, llm, state, recorder)
     finally:
         dossier.save(run_dir)
         _save_state(run_dir, state)

@@ -2,6 +2,7 @@
 
 - 旧版（v0.1 确定性管线）：``python -m papermine <path>``（保持向后兼容）。
 - 新版（M7 编排器）：``analyze`` / ``resume`` / ``status`` 子命令。
+- M13：``trace`` 子命令（按耗时排序汇总执行轨迹，定位瓶颈）。
 """
 from __future__ import annotations
 
@@ -10,7 +11,7 @@ import json
 import os
 import sys
 
-from . import orchestrator, storage
+from . import orchestrator, storage, trace
 from .pipeline import run
 from .report import render_markdown, report_to_dict
 
@@ -83,6 +84,22 @@ def _cmd_status(argv) -> int:
     return 0
 
 
+def _cmd_trace(argv) -> int:
+    parser = argparse.ArgumentParser(
+        prog="papermine trace",
+        description="按耗时排序汇总一次分析的执行轨迹，定位哪个环节最慢。",
+    )
+    parser.add_argument("run_id", help="run_id")
+    ns = parser.parse_args(argv)
+
+    run_dir = storage.run_dir(ns.run_id)
+    if not (run_dir / trace.TRACE_FILENAME).exists():
+        print("错误：run 不存在或没有轨迹文件：{}".format(ns.run_id), file=sys.stderr)
+        return 2
+    sys.stdout.write(trace.render_summary(run_dir))
+    return 0
+
+
 def _dispatch(command: str, argv) -> int:
     if command == "analyze":
         return _cmd_analyze(argv)
@@ -90,6 +107,8 @@ def _dispatch(command: str, argv) -> int:
         return _cmd_resume(argv)
     if command == "status":
         return _cmd_status(argv)
+    if command == "trace":
+        return _cmd_trace(argv)
     return 2
 
 
@@ -133,7 +152,7 @@ def _legacy_main(argv) -> int:
 def main(argv=None) -> int:
     _reconfigure_stdio()
     argv = list(sys.argv[1:] if argv is None else argv)
-    if argv and argv[0] in ("analyze", "resume", "status"):
+    if argv and argv[0] in ("analyze", "resume", "status", "trace"):
         return _dispatch(argv[0], argv[1:])
     return _legacy_main(argv)
 
