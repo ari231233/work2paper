@@ -407,6 +407,22 @@ def _render_report_md(dossier: Dossier) -> str:
                         if reason:
                             seg += " — " + reason
                         lines.append("    - " + seg)
+            evv = ev.get("evidence_validation")
+            if isinstance(evv, dict) and evv.get("evidence"):
+                lines.append("  - 证据强度：{}".format(evv.get("evidence")))
+                reason = str(evv.get("reason") or "").strip()
+                if reason:
+                    lines.append("    - 理由：{}".format(reason))
+                checks = evv.get("checks")
+                if isinstance(checks, dict) and checks:
+                    lines.append("    - 证据审查维度：")
+                    for key, label in evaluate.CHECK_DIMENSIONS:
+                        item = checks.get(key)
+                        if isinstance(item, dict):
+                            status = str(item.get("status") or "").strip()
+                            note = str(item.get("note") or "").strip()
+                            if status and note:
+                                lines.append("      - {}（{}）：{}".format(label, status, note))
             if ev.get("rework_reason"):
                 lines.append("  - 回炉原因：{}".format(ev["rework_reason"]))
     else:

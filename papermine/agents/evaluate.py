@@ -21,6 +21,13 @@ M11 升级：novelty 从单一 0~5 分改为**多维加权评分**（docs/build-
 - 每维分数必须给出**差异化理由**（引用 gap_note / 文献证据），从机制上避免趋同；
 - 无 LLM 时按维度规则粗估（gap 信号强弱 / 方法组合度 / 通用性等），标低置信。
 
+M12 升级：与 novelty 评分**并列**加入「证据强度」子审查（docs/build-plan.md §4 M12）：
+
+- 调 ``agents/evidence.validate_evidence`` 对每个 idea 做 4 维证据审查
+  （文献对拍 / 理论支撑 / 实验设计支持 / claim 强度校准），输出 weak / medium / strong + 理由；
+- ``evidence=weak`` 时把 verdict 下调为 ``rework``，随 verdict 一起回炉到 ④ 细化 claim；
+- 结果写入每条 evaluation 的 ``evidence_validation`` 子对象，并挂进 evidence 证据链。
+
 verdict ∈ {proceed, rework, drop}；每条评估必须挂 `evidence`（provenance 强制）。
 """
 from __future__ import annotations
@@ -32,6 +39,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from ..dossier import Dossier
 from ..llm import LLMError, LLMProvider, SchemaError
+from .evidence import CHECK_DIMENSIONS, validate_evidence
 
 __all__ = [
     "run",
@@ -44,6 +52,7 @@ __all__ = [
     "_score_band",
     "_decide_verdict",
     "_rework_reason",
+    "_append_evidence_validation",
     "_guess_venue",
     "_tier_of",
     "_venue_distribution",
@@ -66,6 +75,9 @@ NOVELTY_DIMENSIONS: Tuple[Tuple[str, str, int], ...] = (
 _DIM_KEYS: Tuple[str, ...] = tuple(k for k, _l, _w in NOVELTY_DIMENSIONS)
 _DIM_LABELS: Dict[str, str] = {k: label for k, label, _w in NOVELTY_DIMENSIONS}
 _DIM_WEIGHTS: Dict[str, int] = {k: w for k, _l, w in NOVELTY_DIMENSIONS}
+
+# M12 证据审查的 4 个维度（来自 agents/evidence.py，供报告/证据链复用）
+_EVIDENCE_CHECK_LABELS: Tuple[Tuple[str, str], ...] = tuple(CHECK_DIMENSIONS)
 
 # 静态档位库：检索到的 venue 名称 -> 档位（architecture §5 ⑤「规则 + 静态档位库」的 MVP 子集）
 _VENUE_TIERS = {
@@ -398,8 +410,12 @@ def _guess_venue(facts: Dict[str, Any], idea: dict,
 # ---------------------------------------------------------------------------
 
 def _decide_verdict(novelty: float, data_feasibility: str, workload: float,
-                    suggestion: Optional[str]) -> str:
-    """综合 verdict：分数段映射旧 verdict 为基础，证据硬护栏优先，LLM 建议仅作下调参考。"""
+                    suggestion: Optional[str], evidence: str = "medium") -> str:
+    """综合 verdict：分数段映射旧 verdict 为基础，证据硬护栏优先，LLM 建议仅作下调参考。
+
+    M12：``evidence=weak``（证据不足以支撑 claim）时下调为 ``rework``（回炉到 ④ 细化 claim），
+    但**不覆盖 ``drop``**（新颖性不足判死时优先放弃）。
+    """
     _band, base = _score_band(novelty)
     if data_feasibility == "low":
         return "rework"        # 无数据支撑，回炉补数据
@@ -407,6 +423,9 @@ def _decide_verdict(novelty: float, data_feasibility: str, workload: float,
         return "rework"        # 工作量过大，需拆分或回炉
     if data_feasibility == "medium" and base == "drop":
         return "rework"        # 中低新颖性 + 数据不完整
+    # M12：证据强度弱 → 回炉细化 claim（仅下调，不把 drop 上调）
+    if evidence == "weak" and base != "drop":
+        return "rework"
     # LLM 建议仅可下调（proceed -> rework/drop），不可把 drop 上调
     if suggestion in ("drop", "rework") and base == "proceed":
         return suggestion
@@ -414,8 +433,10 @@ def _decide_verdict(novelty: float, data_feasibility: str, workload: float,
 
 
 def _rework_reason(verdict: str, novelty: float, data_feasibility: str,
-                   workload: float, llm_reason: Optional[str] = None) -> Optional[str]:
-    """生成 rework_reason（proceed 时为 None）。"""
+                   workload: float, llm_reason: Optional[str] = None,
+                   evidence_strength: Optional[str] = None,
+                   evidence_reason: Optional[str] = None) -> Optional[str]:
+    """生成 rework_reason（proceed 时为 None）。M12：evidence=weak 时给出证据不足的专属理由。"""
     if verdict == "proceed":
         return None
     band_label, _ = _score_band(novelty)
@@ -424,6 +445,9 @@ def _rework_reason(verdict: str, novelty: float, data_feasibility: str,
             novelty, band_label)
     if data_feasibility == "low":
         return "数据可得性低：assets.facts 未识别到数据/指标，需回炉补充评测数据（回退①项目理解补采集）"
+    if evidence_strength == "weak":
+        return "证据不足：evidence=weak；{}（建议回炉到④细化 claim）".format(
+            evidence_reason or "需补文献对拍/理论依据/实验设计")
     if novelty < 70:
         return "新颖性偏低：novelty_score={}（{}），建议回炉到②问题抽象/④创新点生成以强化 novelty".format(
             novelty, band_label)
@@ -560,11 +584,37 @@ def _assemble_evidence(gap_notes: List[str], facts: Dict[str, Any],
     return evidence
 
 
+def _append_evidence_validation(evidence: List[dict],
+                                ev_validation: Dict[str, Any]) -> None:
+    """把 M12 证据强度 + 4 维检查挂进评估证据链（provenance 强制）。"""
+    strength = ev_validation.get("evidence", "medium")
+    reason = str(ev_validation.get("reason") or "").strip()
+    evidence.append({
+        "source": "evidence_validation",
+        "note": "证据强度={}；{}".format(strength, reason[:200] or "（无理由）"),
+    })
+    for key, label in _EVIDENCE_CHECK_LABELS:
+        item = (ev_validation.get("checks") or {}).get(key)
+        if isinstance(item, dict):
+            status = str(item.get("status") or "").strip()
+            note = str(item.get("note") or "").strip()
+            if status and note:
+                evidence.append({
+                    "source": "evidence_validation.{}".format(key),
+                    "note": "{}={}，{}".format(label, status, note[:160]),
+                })
+    if ev_validation.get("degraded"):
+        evidence.append({
+            "source": "degradation",
+            "note": "证据强度为确定性规则粗估（无 LLM 或 LLM 输出非法），低置信",
+        })
+
+
 def _evaluate_idea(idea: dict, facts: Dict[str, Any], gap_notes: List[str],
                    venue_dist: Dict[str, int], venue_summary: str,
-                   data_feasibility: str, llm: LLMProvider,
-                   system_prompt: str) -> dict:
-    """对单个 idea 做证据驱动评估，返回一条 evaluation dict。"""
+                   data_feasibility: str, literature: List[dict],
+                   llm: LLMProvider, system_prompt: str) -> dict:
+    """对单个 idea 做证据驱动评估，返回一条 evaluation dict（含 M11 多维 novelty + M12 证据强度）。"""
     idea_id = str(idea.get("idea_id") or "").strip()
     out = _call_llm(llm, system_prompt, idea, gap_notes, venue_summary, facts)
 
@@ -590,17 +640,32 @@ def _evaluate_idea(idea: dict, facts: Dict[str, Any], gap_notes: List[str],
     if not isinstance(llm_rework_reason, str) or not llm_rework_reason.strip():
         llm_rework_reason = None
 
+    # M12：证据强度子审查（与 novelty 并列），不跑实验，只审证据
+    ev_validation = validate_evidence(idea, literature, llm, facts)
+    evidence_strength = ev_validation.get("evidence", "medium")
+    evidence_reason = str(ev_validation.get("reason") or "").strip() or None
+
     venue_guess = _guess_venue(facts, idea, venue_dist, novelty)
-    verdict = _decide_verdict(novelty, data_feasibility, float(workload), suggestion)
+    verdict = _decide_verdict(novelty, data_feasibility, float(workload),
+                              suggestion, evidence=evidence_strength)
     rework_reason = _rework_reason(verdict, novelty, data_feasibility,
-                                   float(workload), llm_rework_reason)
+                                   float(workload), llm_rework_reason,
+                                   evidence_strength=evidence_strength,
+                                   evidence_reason=evidence_reason)
     evidence = _assemble_evidence(gap_notes, facts, venue_dist, dims, degraded, converged)
+    _append_evidence_validation(evidence, ev_validation)
 
     return {
         "idea_ref": idea_id,
         "novelty_score": novelty,
         "novelty_band": band_label,
         "novelty_dimensions": dims,
+        "evidence_validation": {
+            "evidence": evidence_strength,
+            "reason": evidence_reason or "",
+            "checks": ev_validation.get("checks", {}),
+            "degraded": bool(ev_validation.get("degraded")),
+        },
         "data_feasibility": data_feasibility,
         "workload_hours": workload,
         "venue_guess": venue_guess,
@@ -615,7 +680,7 @@ def _evaluate_idea(idea: dict, facts: Dict[str, Any], gap_notes: List[str],
 # ---------------------------------------------------------------------------
 
 def run(dossier: Dossier, llm: LLMProvider) -> None:
-    """ideas -> evaluations（证据驱动，M11 多维加权），原地写 dossier.evaluations。
+    """ideas -> evaluations（证据驱动，M11 多维加权 + M12 证据强度），原地写 dossier.evaluations。
 
     冻结契约（docs/build-plan.md §3.3）：
         def run(dossier: Dossier, llm: LLMProvider) -> None
@@ -637,7 +702,7 @@ def run(dossier: Dossier, llm: LLMProvider) -> None:
             continue
         evaluations.append(_evaluate_idea(
             idea, facts, gap_notes, venue_dist, venue_summary,
-            data_feasibility, llm, system_prompt,
+            data_feasibility, literature, llm, system_prompt,
         ))
 
     dossier.evaluations = evaluations

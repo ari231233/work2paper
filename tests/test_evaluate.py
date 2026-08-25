@@ -1,9 +1,11 @@
-"""M6/M11 ⑤ 可行性评估 Agent 单测：证据驱动评估、多维加权 novelty、verdict、降级路径、sample 验收。
+"""M6/M11/M12 ⑤ 可行性评估 Agent 单测：证据驱动评估、多维加权 novelty、M12 证据强度、verdict、降级路径、sample 验收。
 
 用标准库 unittest 编写（与 tests/test_dossier.py 一致），`python -m unittest discover -s tests -v`
 即可运行，无需新增第三方依赖（也兼容 pytest 收集）。
 
 M11 增量：novelty 从单一 0~5 升级为 5 维加权（0~100 总分 + 分维度明细 + 分数段映射 verdict）。
+M12 增量：每条 evaluation 附带 ``evidence_validation``（证据强度 weak/medium/strong + 理由 + 4 维检查），
+``evidence=weak`` 时把 verdict 下调为 rework。
 """
 from __future__ import annotations
 
@@ -21,6 +23,7 @@ from papermine.agents.evaluate import (
     _weighted_total,
     run,
 )
+from papermine.agents.evidence import CHECK_DIMENSIONS, EVIDENCE_LEVELS
 from papermine.agents.understand import run as understand_run
 from papermine.dossier import Dossier
 from papermine.llm import LLMError, NullProvider
@@ -28,14 +31,19 @@ from papermine.llm import LLMError, NullProvider
 SAMPLE_PROJECT = Path(__file__).resolve().parent.parent / "examples" / "sample-project"
 
 _DIM_KEYS = tuple(k for k, _l, _w in NOVELTY_DIMENSIONS)
+_CHECK_KEYS = tuple(k for k, _l in CHECK_DIMENSIONS)
 _BANDS = ("Reject", "Weak Reject", "Revise", "Accept", "Priority")
 
 
 class _FakeLLM:
-    """按调用顺序依次返回 results（每个 idea 一次调用）；耗尽后返回空 dict。"""
+    """按 schema 路由返回结果：evaluate schema 走 ``results``，evidence schema 走 ``evidence_results``。
 
-    def __init__(self, results=None, exc=None):
+    M12 给每个 idea 增加一次证据审查调用，故两个队列独立；各自耗尽后返回空 dict（触发确定性兜底）。
+    """
+
+    def __init__(self, results=None, evidence_results=None, exc=None):
         self.results = list(results or [])
+        self.evidence_results = list(evidence_results or [])
         self.exc = exc
         self.calls = []
 
@@ -43,6 +51,11 @@ class _FakeLLM:
         self.calls.append((system, user, schema, temperature))
         if self.exc is not None:
             raise self.exc
+        props = schema.get("properties") or {}
+        if "checks" in props and "evidence" in props:
+            if self.evidence_results:
+                return self.evidence_results.pop(0)
+            return {}
         if self.results:
             return self.results.pop(0)
         return {}
@@ -64,6 +77,23 @@ def _llm_eval(dims=None, workload=80, suggestion="proceed", reason=None):
         "workload_hours": workload,
         "verdict_suggestion": suggestion,
         "rework_reason": reason,
+    }
+
+
+def _evidence_checks(similar="ok", theory="ok", experiment="ok", claim="ok"):
+    return {
+        "similar_work": {"status": similar, "note": "文献对拍：有可比文献且明确区分"},
+        "theory_basis": {"status": theory, "note": "理论支撑：有机制性依据"},
+        "experiment_support": {"status": experiment, "note": "实验设计支持：可验证"},
+        "claim_strength": {"status": claim, "note": "claim 强度校准：范围克制"},
+    }
+
+
+def _llm_evidence(evidence="strong", reason="证据充分", checks=None):
+    return {
+        "evidence": evidence,
+        "reason": reason,
+        "checks": checks if checks is not None else _evidence_checks(),
     }
 
 
@@ -111,6 +141,18 @@ def _assert_dimensions(self, dims):
         self.assertTrue(str(item["reason"]).strip())
 
 
+def _assert_evidence_validation(self, evv):
+    self.assertIsInstance(evv, dict)
+    self.assertIn(evv["evidence"], EVIDENCE_LEVELS)
+    self.assertTrue(str(evv["reason"]).strip())
+    self.assertEqual(set(evv["checks"]), set(_CHECK_KEYS))
+    for key in _CHECK_KEYS:
+        item = evv["checks"][key]
+        self.assertIn(item["status"], ("ok", "concern", "missing"))
+        self.assertTrue(str(item["note"]).strip())
+    self.assertIn(evv["degraded"], (True, False))
+
+
 class RunTest(unittest.TestCase):
     def test_run_null_llm_writes_evaluations_with_verdict(self) -> None:
         d = _dossier()
@@ -129,6 +171,7 @@ class RunTest(unittest.TestCase):
             self.assertIsInstance(ev["workload_hours"], int)
             self.assertTrue(ev["venue_guess"])
             self.assertTrue(ev["evidence"])
+            _assert_evidence_validation(self, ev["evidence_validation"])
             for e in ev["evidence"]:
                 self.assertIn("source", e)
                 self.assertIn("note", e)
@@ -145,6 +188,9 @@ class RunTest(unittest.TestCase):
         self.assertIn("literature.venues", sources)      # 检索论文带 venue
         # M11：分维度明细挂进证据链
         self.assertTrue(any(s.startswith("novelty_dimensions.") for s in sources))
+        # M12：证据强度 + 4 维检查挂进证据链
+        self.assertIn("evidence_validation", sources)
+        self.assertTrue(any(s.startswith("evidence_validation.") for s in sources))
 
     def test_run_with_llm_uses_dimensions_and_weighted_total(self) -> None:
         d = _dossier()
@@ -165,6 +211,53 @@ class RunTest(unittest.TestCase):
         self.assertEqual(d.evaluations[1]["verdict"], "drop")
         self.assertEqual(
             d.evaluations[0]["novelty_dimensions"]["method_novelty"]["score"], 4)
+
+    def test_run_with_llm_evidence_routed_and_recorded(self) -> None:
+        """M12：证据审查独立调用，LLM 结果写入 evidence_validation 且 degraded=False。"""
+        d = _dossier()
+        llm = _FakeLLM(
+            results=[_llm_eval(dims=_dims(), workload=80, suggestion="proceed"),
+                     _llm_eval(dims=_dims(), workload=80, suggestion="proceed")],
+            evidence_results=[
+                _llm_evidence(evidence="strong", reason="证据充分：有文献+理论+可验证"),
+                _llm_evidence(evidence="medium", reason="证据中等"),
+            ],
+        )
+        run(d, llm)
+        self.assertEqual(d.evaluations[0]["evidence_validation"]["evidence"], "strong")
+        self.assertEqual(d.evaluations[0]["evidence_validation"]["reason"],
+                         "证据充分：有文献+理论+可验证")
+        self.assertFalse(d.evaluations[0]["evidence_validation"]["degraded"])
+        self.assertEqual(d.evaluations[1]["evidence_validation"]["evidence"], "medium")
+        _assert_evidence_validation(self, d.evaluations[0]["evidence_validation"])
+
+    def test_weak_evidence_forces_rework(self) -> None:
+        """M12：evidence=weak 时即便 novelty 高也要回炉（rework），随 verdict 回炉到 ④。"""
+        d = _dossier()
+        dims_high = _dims(problem=5, method=5, tech=5, gap=5, gen=5)   # → 100 → Priority
+        llm = _FakeLLM(
+            results=[_llm_eval(dims=dims_high, workload=60, suggestion="proceed")],
+            evidence_results=[_llm_evidence(
+                evidence="weak", reason="已有 memory work 很多，需明确区别")],
+        )
+        run(d, llm)
+        ev = d.evaluations[0]
+        self.assertEqual(ev["evidence_validation"]["evidence"], "weak")
+        self.assertEqual(ev["verdict"], "rework")
+        self.assertIn("证据不足", ev["rework_reason"])
+        self.assertIn("evidence=weak", ev["rework_reason"])
+
+    def test_weak_evidence_does_not_override_drop(self) -> None:
+        """M12：evidence=weak 不覆盖 drop（新颖性不足判死优先）。"""
+        d = _dossier()
+        dims_low = _dims(problem=1, method=1, tech=1, gap=1, gen=1)   # → 20 → Reject
+        llm = _FakeLLM(
+            results=[_llm_eval(dims=dims_low, workload=60, suggestion="proceed")],
+            evidence_results=[_llm_evidence(evidence="weak", reason="无文献对拍")],
+        )
+        run(d, llm)
+        self.assertEqual(d.evaluations[0]["evidence_validation"]["evidence"], "weak")
+        self.assertEqual(d.evaluations[0]["verdict"], "drop")
 
     def test_run_llm_error_falls_back_to_deterministic(self) -> None:
         d = _dossier()
@@ -264,6 +357,17 @@ class VerdictTest(unittest.TestCase):
         # LLM 建议 proceed 但 novelty 过低 → 分数段硬护栏 drop（不可上调）
         self.assertEqual(_decide_verdict(30, "high", 60, "proceed"), "drop")
 
+    def test_weak_evidence_downgrades_proceed_to_rework(self) -> None:
+        """M12：evidence=weak 把 proceed 下调为 rework。"""
+        self.assertEqual(_decide_verdict(75, "high", 60, None, evidence="weak"), "rework")
+
+    def test_weak_evidence_does_not_override_drop(self) -> None:
+        """M12：evidence=weak 不覆盖 drop。"""
+        self.assertEqual(_decide_verdict(30, "high", 60, None, evidence="weak"), "drop")
+
+    def test_medium_evidence_no_downgrade(self) -> None:
+        self.assertEqual(_decide_verdict(75, "high", 60, None, evidence="medium"), "proceed")
+
 
 class VenueTierTest(unittest.TestCase):
     def test_tier_of_known_and_unknown(self) -> None:
@@ -300,6 +404,9 @@ class SampleAcceptanceTest(unittest.TestCase):
             scores = [ev["novelty_dimensions"][k]["score"] for k in _DIM_KEYS]
             self.assertGreater(len(set(scores)), 1,
                                "5 个维度分应不全相等（避免评分趋同）")
+            # M12 验收：每个 idea 输出证据强度 + 理由
+            _assert_evidence_validation(self, ev["evidence_validation"])
+            self.assertIn(ev["evidence_validation"]["evidence"], EVIDENCE_LEVELS)
 
 
 if __name__ == "__main__":
