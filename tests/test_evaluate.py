@@ -36,14 +36,22 @@ _BANDS = ("Reject", "Weak Reject", "Revise", "Accept", "Priority")
 
 
 class _FakeLLM:
-    """按 schema 路由返回结果：evaluate schema 走 ``results``，evidence schema 走 ``evidence_results``。
+    """按 schema 路由返回结果：evaluate / evidence 各分「批量」与「单条」两种路径。
 
-    M12 给每个 idea 增加一次证据审查调用，故两个队列独立；各自耗尽后返回空 dict（触发确定性兜底）。
+    - 批量评估 schema（props 含 ``evaluations``）走 ``batch_results``，未提供时返回空批量
+      （触发逐条回退，不消耗单条队列）；
+    - 批量证据 schema（props 含 ``results``）走 ``batch_evidence``，未提供时返回空批量；
+    - 单条证据 schema（props 含 ``checks`` + ``evidence``）走 ``evidence_results``；
+    - 单条评估 schema 走 ``results``。
+    各自耗尽后返回空 dict（触发确定性兜底）。
     """
 
-    def __init__(self, results=None, evidence_results=None, exc=None):
+    def __init__(self, results=None, evidence_results=None, batch_results=None,
+                 batch_evidence=None, exc=None):
         self.results = list(results or [])
         self.evidence_results = list(evidence_results or [])
+        self.batch_results = list(batch_results or [])
+        self.batch_evidence = list(batch_evidence or [])
         self.exc = exc
         self.calls = []
 
@@ -52,6 +60,14 @@ class _FakeLLM:
         if self.exc is not None:
             raise self.exc
         props = schema.get("properties") or {}
+        if "evaluations" in props:
+            if self.batch_results:
+                return self.batch_results.pop(0)
+            return {"evaluations": []}
+        if "results" in props:
+            if self.batch_evidence:
+                return self.batch_evidence.pop(0)
+            return {"results": []}
         if "checks" in props and "evidence" in props:
             if self.evidence_results:
                 return self.evidence_results.pop(0)
@@ -230,6 +246,52 @@ class RunTest(unittest.TestCase):
         self.assertFalse(d.evaluations[0]["evidence_validation"]["degraded"])
         self.assertEqual(d.evaluations[1]["evidence_validation"]["evidence"], "medium")
         _assert_evidence_validation(self, d.evaluations[0]["evidence_validation"])
+
+    def test_run_batches_evaluations_and_evidence(self) -> None:
+        """M15 方向④：多个 idea 的评估 + 证据审查各合并成一次 LLM 调用（2 次而非 4 次）。"""
+        d = _dossier()
+        dims_high = _dims(problem=5, method=4, tech=4, gap=4, gen=4)   # → 84.0
+        dims_low = _dims(problem=1, method=2, tech=1, gap=1, gen=2)    # → 29.0
+        batch_eval = {"evaluations": [
+            {"idea_id": "i1", **_llm_eval(dims=dims_high, workload=120, suggestion="proceed")},
+            {"idea_id": "i2", **_llm_eval(dims=dims_low, workload=50, suggestion="drop")},
+        ]}
+        batch_evidence = {"results": [
+            {"idea_id": "i1", **_llm_evidence(evidence="strong", reason="证据充分")},
+            {"idea_id": "i2", **_llm_evidence(evidence="medium", reason="证据中等")},
+        ]}
+        llm = _FakeLLM(batch_results=[batch_eval], batch_evidence=[batch_evidence])
+        run(d, llm)
+
+        self.assertEqual(d.evaluations[0]["novelty_score"], _weighted_total(dims_high))
+        self.assertEqual(d.evaluations[1]["novelty_score"], _weighted_total(dims_low))
+        self.assertEqual(d.evaluations[0]["verdict"], "proceed")
+        self.assertEqual(d.evaluations[1]["verdict"], "drop")
+        self.assertEqual(d.evaluations[0]["evidence_validation"]["evidence"], "strong")
+        self.assertEqual(d.evaluations[1]["evidence_validation"]["evidence"], "medium")
+        # 只调 2 次 LLM（1 批量评估 + 1 批量证据），而非 2 idea × 2 调用 = 4 次
+        self.assertEqual(len(llm.calls), 2)
+
+    def test_run_batch_partial_falls_back_per_idea(self) -> None:
+        """批量结果缺失某 idea 时，该 idea 逐条回退（不丢评估、不崩溃）。"""
+        d = _dossier()
+        dims_high = _dims(problem=5, method=4, tech=4, gap=4, gen=4)
+        batch_eval = {"evaluations": [
+            {"idea_id": "i1", **_llm_eval(dims=dims_high, workload=120, suggestion="proceed")},
+        ]}
+        batch_evidence = {"results": [
+            {"idea_id": "i1", **_llm_evidence(evidence="strong", reason="证据充分")},
+        ]}
+        # i2 批量缺失 → 单条队列兜底
+        llm = _FakeLLM(
+            batch_results=[batch_eval], batch_evidence=[batch_evidence],
+            results=[_llm_eval(dims=_dims(problem=2, method=2, tech=2, gap=2, gen=2), workload=60)],
+            evidence_results=[_llm_evidence(evidence="medium", reason="证据中等")],
+        )
+        run(d, llm)
+        self.assertEqual(len(d.evaluations), 2)
+        self.assertEqual(d.evaluations[0]["evidence_validation"]["evidence"], "strong")
+        self.assertEqual(d.evaluations[1]["evidence_validation"]["evidence"], "medium")
 
     def test_weak_evidence_forces_rework(self) -> None:
         """M12：evidence=weak 时即便 novelty 高也要回炉（rework），随 verdict 回炉到 ④。"""

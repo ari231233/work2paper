@@ -113,6 +113,14 @@ class InjectingProvider:
                  schema: dict, temperature: float = 0.2) -> dict:
         return self._inner.complete(system + self._block, user, schema, temperature)
 
+    def complete_fast(self, system: str, user: str,
+                      schema: dict, temperature: float = 0.2) -> dict:
+        """转发快模型调用（M15 模型分级）；底层无 ``complete_fast`` 时回退 ``complete``。"""
+        fast = getattr(self._inner, "complete_fast", None)
+        if callable(fast):
+            return fast(system + self._block, user, schema, temperature)
+        return self._inner.complete(system + self._block, user, schema, temperature)
+
 
 def inject(llm: Any, directives: List[str]) -> Any:
     """无 directive 时原样返回 llm；否则返回包装后的 InjectingProvider。"""

@@ -39,11 +39,12 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from ..dossier import Dossier
 from ..llm import LLMError, LLMProvider, SchemaError
-from .evidence import CHECK_DIMENSIONS, validate_evidence
+from .evidence import CHECK_DIMENSIONS, validate_evidence, validate_evidence_batch
 
 __all__ = [
     "run",
     "EVALUATE_SCHEMA",
+    "EVALUATE_BATCH_SCHEMA",
     "NOVELTY_DIMENSIONS",
     "_data_feasibility",
     "_deterministic_dimensions",
@@ -56,6 +57,8 @@ __all__ = [
     "_guess_venue",
     "_tier_of",
     "_venue_distribution",
+    "_call_llm_batch",
+    "_build_batch_user_prompt",
 ]
 
 # 本 Agent prompt 版本：优先读 prompts/evaluate.md 头的 version，缺失时用此兜底
@@ -137,6 +140,27 @@ EVALUATE_SCHEMA: Dict[str, Any] = {
             "type": "string", "enum": ["proceed", "rework", "drop"],
         },
         "rework_reason": {"type": ["string", "null"]},
+    },
+}
+
+# M15 方向④：批量评估——一次 LLM 调用返回多个 idea 的评估（每条 = 单个 EVALUATE_SCHEMA + idea_id）。
+EVALUATE_BATCH_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["evaluations"],
+    "properties": {
+        "evaluations": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["idea_id"] + list(EVALUATE_SCHEMA["required"]),
+                "properties": dict(
+                    {"idea_id": {"type": "string"}},
+                    **EVALUATE_SCHEMA["properties"],
+                ),
+            },
+        },
     },
 }
 
@@ -511,6 +535,61 @@ def _call_llm(llm: LLMProvider, system_prompt: str, idea: dict,
     return result
 
 
+def _build_batch_user_prompt(ideas: List[dict], gap_notes: List[str],
+                             venue_summary: str, facts: Dict[str, Any]) -> str:
+    """构造批量评估的脱敏输入：一组 idea + 共享证据（gap_notes / venue 分布 / facts）。"""
+    payload = {
+        "ideas": [
+            {
+                "idea_id": idea.get("idea_id"),
+                "claim": idea.get("claim"),
+                "novelty_hypothesis": idea.get("novelty_hypothesis"),
+                "problem_ref": idea.get("problem_ref"),
+                "literature_refs": idea.get("literature_refs"),
+            }
+            for idea in ideas
+            if isinstance(idea, dict)
+        ],
+        "gap_notes": gap_notes,
+        "venue_distribution": venue_summary,
+        "facts": facts,
+    }
+    return (
+        "以下是一组候选创新点及其共享证据，请对每个 idea 分别做证据驱动的可行性评估：\n"
+        + json.dumps(payload, ensure_ascii=False)
+    )
+
+
+def _call_llm_batch(llm: LLMProvider, system_prompt: str, ideas: List[dict],
+                    gap_notes: List[str], venue_summary: str,
+                    facts: Dict[str, Any]) -> Optional[Dict[str, dict]]:
+    """M15 方向④：批量评估多个 idea（一次 LLM 调用），返回 ``{idea_id: 单条评估 dict}``。
+
+    失败 / 空结果 / 结构非法 → 返回 None（由 run 回退到单条 ``_call_llm`` + 确定性兜底）。
+    """
+    if llm is None or not ideas:
+        return None
+    result: Dict[str, Any] = {}
+    try:
+        result = llm.complete(
+            system_prompt,
+            _build_batch_user_prompt(ideas, gap_notes, venue_summary, facts),
+            EVALUATE_BATCH_SCHEMA, temperature=0.2,
+        )
+    except (LLMError, SchemaError):
+        return None
+    if not isinstance(result, dict):
+        return None
+    raw = result.get("evaluations")
+    if not isinstance(raw, list):
+        return None
+    out: Dict[str, dict] = {}
+    for item in raw:
+        if isinstance(item, dict) and str(item.get("idea_id") or "").strip():
+            out[str(item["idea_id"]).strip()] = item
+    return out or None
+
+
 def _extract_dimensions(raw: Any) -> Optional[Dict[str, Any]]:
     """从 LLM 输出提取并规范化 5 维度分；任一维度缺失/非法 → 返回 None（触发确定性兜底）。"""
     if not isinstance(raw, dict):
@@ -613,10 +692,17 @@ def _append_evidence_validation(evidence: List[dict],
 def _evaluate_idea(idea: dict, facts: Dict[str, Any], gap_notes: List[str],
                    venue_dist: Dict[str, int], venue_summary: str,
                    data_feasibility: str, literature: List[dict],
-                   llm: LLMProvider, system_prompt: str) -> dict:
-    """对单个 idea 做证据驱动评估，返回一条 evaluation dict（含 M11 多维 novelty + M12 证据强度）。"""
+                   llm: LLMProvider, system_prompt: str,
+                   llm_out: Optional[Dict[str, Any]] = None,
+                   ev_validation: Optional[Dict[str, Any]] = None) -> dict:
+    """对单个 idea 做证据驱动评估，返回一条 evaluation dict（含 M11 多维 novelty + M12 证据强度）。
+
+    ``llm_out`` / ``ev_validation`` 为 M15 批量路径注入的结果；为 None 时回退到单条调用，
+    保证批量失败时逐条降级，绝不改变确定性兜底语义。
+    """
     idea_id = str(idea.get("idea_id") or "").strip()
-    out = _call_llm(llm, system_prompt, idea, gap_notes, venue_summary, facts)
+    out = llm_out if llm_out is not None else _call_llm(
+        llm, system_prompt, idea, gap_notes, venue_summary, facts)
 
     # M11：5 维度分（优先 LLM，否则确定性粗估），加权合成 0~100 总分
     dims = _extract_dimensions(out.get("novelty_dimensions"))
@@ -640,8 +726,9 @@ def _evaluate_idea(idea: dict, facts: Dict[str, Any], gap_notes: List[str],
     if not isinstance(llm_rework_reason, str) or not llm_rework_reason.strip():
         llm_rework_reason = None
 
-    # M12：证据强度子审查（与 novelty 并列），不跑实验，只审证据
-    ev_validation = validate_evidence(idea, literature, llm, facts)
+    # M12：证据强度子审查（与 novelty 并列），不跑实验，只审证据；批量路径传入结果则复用
+    if ev_validation is None:
+        ev_validation = validate_evidence(idea, literature, llm, facts)
     evidence_strength = ev_validation.get("evidence", "medium")
     evidence_reason = str(ev_validation.get("reason") or "").strip() or None
 
@@ -696,13 +783,21 @@ def run(dossier: Dossier, llm: LLMProvider) -> None:
     data_feasibility = _data_feasibility(facts)
     system_prompt, version = _load_prompt()
 
+    # M15 方向④：批量推理——多个 idea 的评估 + 证据审查各合并成一次 LLM 调用。
+    # 批量失败 / 某 idea 缺失时，逐条回退（保证确定性兜底语义不变）。
+    eval_batch = _call_llm_batch(llm, system_prompt, ideas, gap_notes, venue_summary, facts)
+    evidence_batch = validate_evidence_batch(ideas, literature, llm, facts)
+
     evaluations: List[dict] = []
     for idea in ideas:
         if not isinstance(idea, dict) or not (idea.get("idea_id") or "").strip():
             continue
+        idea_id = str(idea.get("idea_id") or "").strip()
         evaluations.append(_evaluate_idea(
             idea, facts, gap_notes, venue_dist, venue_summary,
             data_feasibility, literature, llm, system_prompt,
+            llm_out=eval_batch.get(idea_id) if eval_batch else None,
+            ev_validation=evidence_batch.get(idea_id) if evidence_batch else None,
         ))
 
     dossier.evaluations = evaluations

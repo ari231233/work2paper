@@ -33,18 +33,22 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from ..llm import LLMError, LLMProvider, SchemaError
+from ..llm import LLMError, LLMProvider, SchemaError, complete_fast
 
 __all__ = [
     "validate_evidence",
+    "validate_evidence_batch",
     "EVIDENCE_SCHEMA",
+    "EVIDENCE_BATCH_SCHEMA",
     "EVIDENCE_LEVELS",
     "CHECK_DIMENSIONS",
     "_deterministic_checks",
     "_aggregate_evidence",
     "_extract_checks",
     "_build_user_prompt",
+    "_build_batch_user_prompt",
     "_call_llm",
+    "_finalize_evidence",
 ]
 
 # 本 Agent prompt 版本：优先读 prompts/evidence.md 头的 version，缺失时用此兜底
@@ -149,6 +153,34 @@ EVIDENCE_SCHEMA: Dict[str, Any] = {
     },
 }
 
+# M15 方向④：批量证据审查——一次 LLM 调用返回多个 idea 的证据审查结果。
+EVIDENCE_BATCH_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["results"],
+    "properties": {
+        "results": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["idea_id", "evidence", "reason", "checks"],
+                "properties": {
+                    "idea_id": {"type": "string"},
+                    "evidence": {"type": "string", "enum": list(EVIDENCE_LEVELS)},
+                    "reason": {"type": "string"},
+                    "checks": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": list(_CHECK_KEYS),
+                        "properties": {k: _check_object() for k in _CHECK_KEYS},
+                    },
+                },
+            },
+        },
+    },
+}
+
 
 # ---------------------------------------------------------------------------
 # 输入装配
@@ -235,13 +267,13 @@ def _build_user_prompt(idea: dict, literature: List[dict],
 
 def _call_llm(llm: Optional[LLMProvider], system: str, idea: dict,
               literature: List[dict], facts: Dict[str, Any]) -> Dict[str, Any]:
-    """调用 LLM；任何失败/空结果都返回空 dict，由上层降级到确定性规则。"""
+    """调用 LLM（M15：证据审查属「简单校验」，走便宜快模型）；失败/空结果返回空 dict。"""
     if llm is None:
         return {}
     result: Dict[str, Any] = {}
     try:
-        result = llm.complete(
-            system, _build_user_prompt(idea, literature, facts),
+        result = complete_fast(
+            llm, system, _build_user_prompt(idea, literature, facts),
             EVIDENCE_SCHEMA, temperature=0.2,
         )
     except (LLMError, SchemaError):
@@ -249,6 +281,38 @@ def _call_llm(llm: Optional[LLMProvider], system: str, idea: dict,
     if not isinstance(result, dict):
         result = {}
     return result
+
+
+def _build_batch_user_prompt(ideas: List[dict], literature: List[dict],
+                             facts: Dict[str, Any]) -> str:
+    """构造批量证据审查的脱敏输入：一组 idea + 共享文献摘要 + 项目事实。"""
+    payload = {
+        "ideas": [
+            {
+                "idea_id": idea.get("idea_id"),
+                "claim": idea.get("claim"),
+                "novelty_hypothesis": idea.get("novelty_hypothesis"),
+                "problem_ref": idea.get("problem_ref"),
+                "literature_refs": idea.get("literature_refs"),
+                "hypothesis_refs": idea.get("hypothesis_refs"),
+                "gap_refs": idea.get("gap_refs"),
+            }
+            for idea in ideas
+            if isinstance(idea, dict)
+        ],
+        "literature": _literature_summary(literature),
+        "facts": {
+            "data": (facts or {}).get("data"),
+            "metrics": (facts or {}).get("metrics"),
+            "methods": (facts or {}).get("methods"),
+            "scenarios": (facts or {}).get("scenarios"),
+        },
+    }
+    return (
+        "以下是一组候选创新点及其可用的证据材料，请对每个 idea 分别做证据审查"
+        "（不跑实验，只判断「这个 claim 站不站得住」）：\n"
+        + json.dumps(payload, ensure_ascii=False)
+    )
 
 
 def _extract_checks(raw: Any) -> Optional[Dict[str, Dict[str, str]]]:
@@ -442,6 +506,31 @@ def _weak_dims_text(checks: Dict[str, Dict[str, str]]) -> str:
 # 冻结入口（纯函数，供 evaluate.py 在 EVALUATE 内部调用）
 # ---------------------------------------------------------------------------
 
+def _finalize_evidence(raw: Any, idea: dict, literature: List[dict],
+                       facts: Dict[str, Any]) -> Dict[str, Any]:
+    """把一条 LLM 原始输出（或空）规范化为 ``{evidence, reason, checks, degraded}``。
+
+    与 ``validate_evidence`` 的收尾逻辑一致：checks 非法 / 缺失 → 确定性兜底（degraded=True）；
+    evidence 非法 → 用 checks 重新聚合；reason 缺失 → 兜底补。单条与批量路径共用，保证二者语义一致。
+    """
+    facts = facts or {}
+    raw = raw if isinstance(raw, dict) else {}
+    checks = _extract_checks(raw.get("checks"))
+    if checks is None:
+        checks = _deterministic_checks(idea, literature, facts)
+        evidence, reason = _aggregate_evidence(checks)
+        return {"evidence": evidence, "reason": reason, "checks": checks, "degraded": True}
+
+    evidence = raw.get("evidence")
+    if evidence not in EVIDENCE_LEVELS:
+        evidence, _ = _aggregate_evidence(checks)
+    reason = _clean(raw.get("reason"))
+    if not reason:
+        _, reason = _aggregate_evidence(checks)
+
+    return {"evidence": evidence, "reason": reason, "checks": checks, "degraded": False}
+
+
 def validate_evidence(idea: dict, literature: List[dict],
                       llm: Optional[LLMProvider],
                       facts: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -456,18 +545,48 @@ def validate_evidence(idea: dict, literature: List[dict],
     """
     system, _version = _load_prompt()
     raw = _call_llm(llm, system, idea, literature, facts or {})
+    return _finalize_evidence(raw, idea, literature, facts or {})
 
-    checks = _extract_checks(raw.get("checks"))
-    if checks is None:
-        checks = _deterministic_checks(idea, literature, facts or {})
-        evidence, reason = _aggregate_evidence(checks)
-        return {"evidence": evidence, "reason": reason, "checks": checks, "degraded": True}
 
-    evidence = raw.get("evidence")
-    if evidence not in EVIDENCE_LEVELS:
-        evidence, _ = _aggregate_evidence(checks)
-    reason = _clean(raw.get("reason"))
-    if not reason:
-        _, reason = _aggregate_evidence(checks)
+def validate_evidence_batch(ideas: List[dict], literature: List[dict],
+                            llm: Optional[LLMProvider],
+                            facts: Optional[Dict[str, Any]] = None) -> Dict[str, Dict[str, Any]]:
+    """M15 方向④：批量证据审查——一次 LLM 调用审查多个 idea，返回 ``{idea_id: 结果}``。
 
-    return {"evidence": evidence, "reason": reason, "checks": checks, "degraded": False}
+    - 返回每个 idea 的 ``{evidence, reason, checks, degraded}``；
+    - 失败 / 空结果 / 某 idea 缺失 → 该 idea 不在返回 dict 中（由 evaluate.py 回退单条路径）；
+    - 与 ``validate_evidence`` 语义一致（共用 ``_finalize_evidence``），绝不抛异常。
+    """
+    if llm is None or not ideas:
+        return {}
+    facts = facts or {}
+    idea_by_id: Dict[str, dict] = {}
+    for idea in ideas:
+        if isinstance(idea, dict) and _clean(idea.get("idea_id")):
+            idea_by_id[_clean(idea.get("idea_id"))] = idea
+
+    system, _version = _load_prompt()
+    result: Dict[str, Any] = {}
+    try:
+        result = complete_fast(
+            llm, system, _build_batch_user_prompt(ideas, literature, facts),
+            EVIDENCE_BATCH_SCHEMA, temperature=0.2,
+        )
+    except (LLMError, SchemaError):
+        return {}
+    if not isinstance(result, dict):
+        return {}
+    raw = result.get("results")
+    if not isinstance(raw, list):
+        return {}
+
+    out: Dict[str, Dict[str, Any]] = {}
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        idea_id = _clean(item.get("idea_id"))
+        idea = idea_by_id.get(idea_id)
+        if not idea_id or idea is None:
+            continue
+        out[idea_id] = _finalize_evidence(item, idea, literature, facts)
+    return out

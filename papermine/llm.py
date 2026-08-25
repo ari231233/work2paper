@@ -25,6 +25,7 @@ __all__ = [
     "DeepSeekProvider",
     "NullProvider",
     "get_provider",
+    "complete_fast",
 ]
 
 
@@ -43,6 +44,23 @@ class LLMProvider(Protocol):
                  schema: dict, temperature: float = 0.2) -> dict:
         """返回符合 schema 的 dict；失败抛 LLMError / SchemaError。"""
         ...
+
+
+def complete_fast(llm: Any, system: str, user: str,
+                  schema: dict, temperature: float = 0.2) -> dict:
+    """用便宜快模型调用（M15 方向③）；provider 不支持分级时回退 ``complete``（同模型）。
+
+    冻结契约 §3.1 只定义了 ``complete``，此处**不改变**其签名，而是新增一个分级入口：
+    上层（retrieval / evidence 等「翻译 / gap_note / 简单校验」环节）调用本函数，
+    底层 ``DeepSeekProvider.complete_fast`` 走 ``fast_model``；``NullProvider`` 返回空 dict；
+    测试桩只实现 ``complete`` 时自动回退，保证不回归。
+    """
+    if llm is None:
+        return {}
+    fast = getattr(llm, "complete_fast", None)
+    if callable(fast):
+        return fast(system, user, schema, temperature)
+    return llm.complete(system, user, schema, temperature)
 
 
 # ---------------------------------------------------------------------------
@@ -149,14 +167,22 @@ def _parse_content(content: str) -> Dict[str, Any]:
 
 
 class DeepSeekProvider:
-    """DeepSeek 实现：OpenAI 兼容 chat/completions + JSON mode + schema 校验重试。"""
+    """DeepSeek 实现：OpenAI 兼容 chat/completions + JSON mode + schema 校验重试。
+
+    M15 模型分级（方向③）：同一 provider 支持两个模型——
+    - ``model``：核心推理模型（ideate / evaluate 等），走 ``complete()``；
+    - ``fast_model``：便宜快模型（翻译 / gap_note / 简单校验），走 ``complete_fast()``。
+    二者默认相同（``fast_model`` 缺省时 = ``model``），分级可插拔且不破坏冻结契约 §3.1。
+    """
 
     def __init__(self, api_key: str, base_url: str, model: str,
+                 fast_model: Optional[str] = None,
                  timeout: float = 60.0, max_retries: int = 2,
                  client: Optional[httpx.Client] = None) -> None:
         self.api_key = api_key
         self.base_url = base_url.rstrip("/")
         self.model = model
+        self.fast_model = fast_model or model
         self.timeout = timeout
         self.max_retries = max_retries
         # 复用长连接 Client（连接池 + keep-alive + TLS 复用）；测试注入 MockTransport 时用之。
@@ -164,11 +190,21 @@ class DeepSeekProvider:
 
     def complete(self, system: str, user: str,
                  schema: dict, temperature: float = 0.2) -> dict:
-        """请求结构化输出并校验 schema；校验失败重试 max_retries 次，仍失败抛 SchemaError。"""
+        """核心推理模型：请求结构化输出并校验 schema；失败重试 max_retries 次。"""
+        return self._complete(self.model, system, user, schema, temperature)
+
+    def complete_fast(self, system: str, user: str,
+                      schema: dict, temperature: float = 0.2) -> dict:
+        """便宜快模型（M15 方向③）：与 ``complete`` 相同的结构化输出 + 校验重试语义。"""
+        return self._complete(self.fast_model, system, user, schema, temperature)
+
+    def _complete(self, model: str, system: str, user: str,
+                  schema: dict, temperature: float) -> dict:
+        """按指定模型请求结构化输出并校验 schema；校验失败重试，仍失败抛 SchemaError。"""
         last_err: Optional[SchemaError] = None
         for attempt in range(self.max_retries + 1):
             try:
-                data = self._call_once(system, user, schema, temperature)
+                data = self._call_once(model, system, user, schema, temperature)
             except LLMError:
                 # 网络 / HTTP / 响应结构问题不属于 schema 校验失败，直接上抛
                 raise
@@ -186,10 +222,10 @@ class DeepSeekProvider:
             )
         raise last_err if last_err is not None else SchemaError("schema 校验失败")
 
-    def _call_once(self, system: str, user: str,
+    def _call_once(self, model: str, system: str, user: str,
                    schema: dict, temperature: float) -> Dict[str, Any]:
         payload = {
-            "model": self.model,
+            "model": model,
             "messages": [
                 {"role": "system", "content": _build_system(system, schema)},
                 {"role": "user", "content": user},
@@ -231,11 +267,16 @@ class DeepSeekProvider:
 class NullProvider:
     """无 API key 时的离线兜底实现。
 
-    ``complete()`` 恒返回空 dict：上层拿到空结果后应降级到确定性规则（架构 §7 / §8）。
+    ``complete()`` / ``complete_fast()`` 恒返回空 dict：上层拿到空结果后应降级到确定性规则
+    （架构 §7 / §8）。
     """
 
     def complete(self, system: str, user: str,
                  schema: dict, temperature: float = 0.2) -> dict:
+        return {}
+
+    def complete_fast(self, system: str, user: str,
+                      schema: dict, temperature: float = 0.2) -> dict:
         return {}
 
 
@@ -253,4 +294,5 @@ def get_provider() -> LLMProvider:
         api_key=api_key,
         base_url=cfg.get("base_url", "https://api.deepseek.com"),
         model=cfg.get("model", "deepseek-chat"),
+        fast_model=cfg.get("fast_model") or cfg.get("model", "deepseek-chat"),
     )

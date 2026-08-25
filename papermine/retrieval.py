@@ -32,7 +32,7 @@ from xml.etree import ElementTree
 import httpx
 
 from .config import apply_proxy
-from .llm import LLMError, LLMProvider, SchemaError
+from .llm import LLMError, LLMProvider, SchemaError, complete_fast
 
 __all__ = [
     "search_literature",
@@ -457,7 +457,7 @@ def _llm_rewrite(llm: Optional[LLMProvider], query: str,
         ],
     }, ensure_ascii=False)
     try:
-        result = llm.complete(_REWRITE_SYSTEM, user, QUERY_REWRITE_SCHEMA, temperature=0.3)
+        result = complete_fast(llm, _REWRITE_SYSTEM, user, QUERY_REWRITE_SCHEMA, temperature=0.3)
     except (LLMError, SchemaError):
         return None
     if not isinstance(result, dict):
@@ -494,7 +494,7 @@ def _translate_query(llm: Optional[LLMProvider], query: str) -> tuple:
         return query, _extract_keywords(query)
     user = json.dumps({"query": query}, ensure_ascii=False)
     try:
-        result = llm.complete(_TRANSLATE_SYSTEM, user, TRANSLATE_SCHEMA, temperature=0.2)
+        result = complete_fast(llm, _TRANSLATE_SYSTEM, user, TRANSLATE_SCHEMA, temperature=0.2)
     except (LLMError, SchemaError):
         return query, _extract_keywords(query)
     if not isinstance(result, dict):
@@ -552,7 +552,7 @@ def _llm_relevance(llm: Optional[LLMProvider], query: str,
         ],
     }, ensure_ascii=False)
     try:
-        result = llm.complete(_RELEVANCE_SYSTEM, user, RELEVANCE_SCHEMA, temperature=0.0)
+        result = complete_fast(llm, _RELEVANCE_SYSTEM, user, RELEVANCE_SCHEMA, temperature=0.0)
     except (LLMError, SchemaError):
         return None
     if not isinstance(result, dict):
@@ -638,7 +638,7 @@ def _llm_gap_note(llm: Optional[LLMProvider], query: str,
         ],
     }, ensure_ascii=False)
     try:
-        result = llm.complete(_GAP_SYSTEM, user, GAP_SCHEMA, temperature=0.2)
+        result = complete_fast(llm, _GAP_SYSTEM, user, GAP_SCHEMA, temperature=0.2)
     except (LLMError, SchemaError):
         return None
     if not isinstance(result, dict):

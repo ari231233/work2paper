@@ -8,11 +8,13 @@ import unittest
 
 from papermine.agents.evidence import (
     CHECK_DIMENSIONS,
+    EVIDENCE_BATCH_SCHEMA,
     EVIDENCE_LEVELS,
     EVIDENCE_SCHEMA,
     _aggregate_evidence,
     _deterministic_checks,
     validate_evidence,
+    validate_evidence_batch,
 )
 from papermine.llm import LLMError, NullProvider
 
@@ -172,6 +174,12 @@ class SchemaTest(unittest.TestCase):
         enum = EVIDENCE_SCHEMA["properties"]["evidence"]["enum"]
         self.assertEqual(enum, list(EVIDENCE_LEVELS))
 
+    def test_batch_schema_requires_results_with_idea_id(self):
+        self.assertEqual(EVIDENCE_BATCH_SCHEMA["type"], "object")
+        self.assertEqual(EVIDENCE_BATCH_SCHEMA["required"], ["results"])
+        items = EVIDENCE_BATCH_SCHEMA["properties"]["results"]["items"]
+        self.assertEqual(items["required"], ["idea_id", "evidence", "reason", "checks"])
+
 
 class SampleAcceptanceTest(unittest.TestCase):
     """验收：对 sample 场景的 idea 输出证据强度 + 理由（离线确定性路径）。"""
@@ -191,6 +199,68 @@ class SampleAcceptanceTest(unittest.TestCase):
             self.assertTrue(out["reason"].strip())
             self.assertEqual(set(out["checks"]), set(_CHECK_KEYS))
             self.assertTrue(out["degraded"])
+
+
+class _BatchLLM:
+    """批量证据审查 stub：对每次 ``complete`` 返回固定的批量结果（或抛错）。"""
+
+    def __init__(self, batch=None, exc=None):
+        self.batch = batch if batch is not None else {}
+        self.exc = exc
+        self.calls = []
+
+    def complete(self, system, user, schema, temperature=0.2):
+        self.calls.append((system, user, schema, temperature))
+        if self.exc is not None:
+            raise self.exc
+        return self.batch
+
+
+class ValidateEvidenceBatchTest(unittest.TestCase):
+    """M15 方向④：批量证据审查一次调用审查多个 idea。"""
+
+    def _ideas(self):
+        return [
+            {"idea_id": "i1", "claim": "提出一种改进方法", "novelty_hypothesis": "假设有效",
+             "problem_ref": "p1", "literature_refs": [], "hypothesis_refs": []},
+            {"idea_id": "i2", "claim": "提出另一种改进方法", "novelty_hypothesis": "假设有效",
+             "problem_ref": "p2", "literature_refs": [], "hypothesis_refs": []},
+        ]
+
+    def test_batch_returns_per_idea_results(self):
+        batch = {"results": [
+            {"idea_id": "i1", **_llm_result(evidence="strong", reason="证据充分")},
+            {"idea_id": "i2", **_llm_result(evidence="medium", reason="证据中等")},
+        ]}
+        llm = _BatchLLM(batch)
+        out = validate_evidence_batch(self._ideas(), _literature(), llm)
+        self.assertEqual(set(out), {"i1", "i2"})
+        self.assertEqual(out["i1"]["evidence"], "strong")
+        self.assertEqual(out["i2"]["evidence"], "medium")
+        self.assertFalse(out["i1"]["degraded"])
+        self.assertEqual(len(llm.calls), 1)  # 一次调用审查 2 个 idea
+
+    def test_batch_null_llm_returns_empty(self):
+        self.assertEqual(validate_evidence_batch(self._ideas(), _literature(), NullProvider()), {})
+
+    def test_batch_error_returns_empty(self):
+        llm = _BatchLLM(exc=LLMError("网络失败"))
+        self.assertEqual(validate_evidence_batch(self._ideas(), _literature(), llm), {})
+
+    def test_batch_invalid_structure_returns_empty(self):
+        self.assertEqual(validate_evidence_batch(self._ideas(), _literature(), _BatchLLM({"bogus": 1})), {})
+
+    def test_batch_invalid_idea_degrades_deterministic(self):
+        # 某条 checks 非法 → 该 idea 走确定性兜底（degraded=True）
+        batch = {"results": [
+            {"idea_id": "i1", "evidence": "strong", "reason": "x",
+             "checks": {"similar_work": {"status": "ok"}}},  # 缺维度 → 非法
+            {"idea_id": "i2", **_llm_result(evidence="medium", reason="证据中等")},
+        ]}
+        out = validate_evidence_batch(self._ideas(), _literature(), _BatchLLM(batch))
+        self.assertTrue(out["i1"]["degraded"])
+        self.assertEqual(set(out["i1"]["checks"]), set(_CHECK_KEYS))
+        self.assertFalse(out["i2"]["degraded"])
 
 
 if __name__ == "__main__":

@@ -12,6 +12,7 @@ from papermine.llm import (
     SchemaError,
     DeepSeekProvider,
     NullProvider,
+    complete_fast,
     get_provider,
     _validate_schema,
 )
@@ -60,6 +61,77 @@ def test_get_provider_with_key_returns_deepseek(monkeypatch):
 def test_null_provider_returns_empty_dict():
     provider = NullProvider()
     assert provider.complete("sys", "user", SCHEMA) == {}
+
+
+# ---------------------------------------------------------------------------
+# M15 方向③：模型分级（complete_fast / fast_model）
+# ---------------------------------------------------------------------------
+
+def test_get_provider_reads_fast_model(monkeypatch):
+    monkeypatch.setattr(
+        llm, "get_llm_config",
+        lambda: {"api_key": "sk-1", "base_url": "https://api.deepseek.com",
+                 "model": "deepseek-chat", "fast_model": "cheap-model"},
+    )
+    provider = get_provider()
+    assert isinstance(provider, DeepSeekProvider)
+    assert provider.model == "deepseek-chat"
+    assert provider.fast_model == "cheap-model"
+
+
+def test_get_provider_fast_model_defaults_to_model(monkeypatch):
+    # 旧 config（无 fast_model）→ fast_model 回退到 model，行为不变
+    monkeypatch.setattr(
+        llm, "get_llm_config",
+        lambda: {"api_key": "sk-1", "base_url": "https://api.deepseek.com", "model": "deepseek-chat"},
+    )
+    provider = get_provider()
+    assert provider.fast_model == "deepseek-chat"
+
+
+def test_deepseek_complete_fast_uses_fast_model():
+    captured = {}
+
+    def handler(request):
+        captured["body"] = json.loads(request.content)
+        return _ok_json({"title": "x"})
+
+    provider = DeepSeekProvider("sk", "https://api.deepseek.com", "deepseek-chat",
+                                fast_model="deepseek-fast", client=_client(handler))
+    provider.complete_fast("sys", "user", SCHEMA)
+    assert captured["body"]["model"] == "deepseek-fast"
+
+
+def test_deepseek_complete_uses_core_model():
+    captured = {}
+
+    def handler(request):
+        captured["body"] = json.loads(request.content)
+        return _ok_json({"title": "x"})
+
+    provider = DeepSeekProvider("sk", "https://api.deepseek.com", "deepseek-chat",
+                                fast_model="deepseek-fast", client=_client(handler))
+    provider.complete("sys", "user", SCHEMA)
+    assert captured["body"]["model"] == "deepseek-chat"
+
+
+def test_null_provider_complete_fast_returns_empty():
+    assert NullProvider().complete_fast("sys", "user", SCHEMA) == {}
+
+
+def test_complete_fast_helper_falls_back_to_complete():
+    """provider 只实现 complete（如测试桩）时，complete_fast 助手回退，不回归。"""
+    class OnlyComplete:
+        def __init__(self):
+            self.calls = []
+
+        def complete(self, system, user, schema, temperature=0.2):
+            self.calls.append((system, user))
+            return {"ok": 1}
+
+    provider = OnlyComplete()
+    assert complete_fast(provider, "sys", "user", SCHEMA) == {"ok": 1}
+    assert len(provider.calls) == 1
 
 
 # ---------------------------------------------------------------------------

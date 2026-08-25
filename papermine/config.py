@@ -61,7 +61,12 @@ def apply_proxy() -> None:
 
 
 def get_llm_config() -> Dict[str, str]:
-    """读取 LLM 配置；优先环境变量，其次 .env，最后默认值。"""
+    """读取 LLM 配置；优先环境变量，其次 .env，最后默认值。
+
+    M15 模型分级：``model`` 是核心推理模型（ideate / evaluate 等），``fast_model`` 是
+    便宜快模型（翻译 / gap_note / 简单校验）。二者默认都指向 ``deepseek-chat``（行为
+    与 M15 之前一致），用户可把 ``DEEPSEEK_FAST_MODEL`` 指向更便宜/更快的模型来降低成本。
+    """
     apply_proxy()
     dotenv = load_env()
 
@@ -73,4 +78,5 @@ def get_llm_config() -> Dict[str, str]:
         "api_key": pick("DEEPSEEK_API_KEY", ""),
         "base_url": pick("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
         "model": pick("DEEPSEEK_MODEL", "deepseek-chat"),
+        "fast_model": pick("DEEPSEEK_FAST_MODEL", "deepseek-chat"),
     }

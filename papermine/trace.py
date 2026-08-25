@@ -190,6 +190,17 @@ def _model_of(provider: Any) -> Optional[str]:
     return type(provider).__name__ if provider is not None else None
 
 
+def _fast_model_of(provider: Any) -> Optional[str]:
+    """沿 ``_inner`` 链找到底层 provider 的 ``fast_model``（M15 模型分级）；找不到退回 ``_model_of``。"""
+    obj = provider
+    while obj is not None:
+        model = getattr(obj, "fast_model", None)
+        if model:
+            return str(model)
+        obj = getattr(obj, "_inner", None)
+    return _model_of(provider)
+
+
 class _TracedLLM:
     """记录每次 ``complete()`` 耗时的 provider 包装器（结果/异常原样透传）。"""
 
@@ -214,13 +225,34 @@ class _TracedLLM:
         self._record_llm(start, status)
         return result
 
-    def _record_llm(self, start: float, status: str) -> None:
+    def complete_fast(self, system: str, user: str,
+                      schema: dict, temperature: float = 0.2) -> dict:
+        """记录快模型调用耗时（M15 模型分级）；底层无 ``complete_fast`` 时回退 ``complete``。"""
+        start = time.perf_counter()
+        status = "ok"
+        try:
+            fast = getattr(self._inner, "complete_fast", None)
+            result = fast(system, user, schema, temperature) if callable(fast) \
+                else self._inner.complete(system, user, schema, temperature)
+        except Exception as exc:  # noqa: BLE001
+            status = type(exc).__name__
+            self._record_llm(start, status, fast=True)
+            low = str(exc).lower()
+            if isinstance(exc, httpx.TimeoutException) or \
+                    any(m in low for m in ("timeout", "timed out", "timedout")):
+                self._record_timeout_signal(str(exc))
+            raise
+        self._record_llm(start, status, fast=True)
+        return result
+
+    def _record_llm(self, start: float, status: str, fast: bool = False) -> None:
         if self._recorder is None:
             return
+        model = _fast_model_of(self._inner) if fast else _model_of(self._inner)
         self._recorder.event(
             "llm",
             duration_ms=_duration_ms(start),
-            model=_model_of(self._inner),
+            model=model,
             tokens=None,          # 当前 provider 不回传 usage，token 数不可获取
             status=status,
             stage=current_stage(),
