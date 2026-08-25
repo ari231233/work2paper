@@ -316,6 +316,50 @@ def _execute(run_dir: Path, project_dir: str, dossier: Dossier, llm: Any,
 # 报告（run_dir/report.md + report.json）
 # ---------------------------------------------------------------------------
 
+def _md_text(s: Any) -> str:
+    """把任意值折叠成单行文本（去首尾 / 合并空白），供报告渲染安全拼接。"""
+    return " ".join(str(s or "").split())
+
+
+# M5 v2 文献理解五元组的展示标签（与 literature.py 的 understanding 字段对齐）
+_UNDERSTANDING_FIELDS = (
+    ("claim", "核心主张"),
+    ("method", "方法"),
+    ("conclusion", "结论"),
+    ("applicability", "适用条件"),
+    ("limitations", "局限"),
+)
+
+# contradiction_graph.gaps[].type → 中文标签（与 literature.py 对齐）
+_GAP_TYPE_LABELS = {"gap": "缺口", "contradiction": "矛盾"}
+
+
+def _render_understanding_lines(paper: Dict[str, Any]) -> List[str]:
+    """把单篇论文的结构化理解渲染成嵌套子行；无 understanding 时返回空列表（M9 v2）。"""
+    u = paper.get("understanding") if isinstance(paper, dict) else None
+    if not isinstance(u, dict):
+        return []
+    lines: List[str] = []
+    for key, label in _UNDERSTANDING_FIELDS:
+        text = _md_text(u.get(key))
+        if text:
+            lines.append("    - {}：{}".format(label, text))
+    return lines
+
+
+def _entry_gap_records(entry: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """从文献条目取出 contradiction_graph.gaps（含 gap_id 的记录）；缺失/旧格式返回空。"""
+    graph = entry.get("contradiction_graph") if isinstance(entry, dict) else None
+    gaps = (graph or {}).get("gaps") if isinstance(graph, dict) else None
+    return [g for g in (gaps or []) if isinstance(g, dict) and _md_text(g.get("gap_id"))]
+
+
+def _entry_hypothesis_records(entry: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """从文献条目取出 hypotheses（含 hypothesis_id 的记录）；缺失/旧格式返回空。"""
+    hyps = entry.get("hypotheses") if isinstance(entry, dict) else None
+    return [h for h in (hyps or []) if isinstance(h, dict) and _md_text(h.get("hypothesis_id"))]
+
+
 def _render_report_md(dossier: Dossier) -> str:
     lines = ["# papermine 分析报告", ""]
     lines.append("> run_id: {}".format(dossier.meta.get("run_id") or dossier.meta.get("project_id")))
@@ -366,6 +410,8 @@ def _render_report_md(dossier: Dossier) -> str:
                         lines.append("  - {}（{}）".format(title, "，".join(meta)))
                     else:
                         lines.append("  - {}".format(title))
+                    # M9 v2：每篇论文附结构化理解（claim / 方法 / 结论 / 适用条件 / 局限）
+                    lines.extend(_render_understanding_lines(p))
             else:
                 lines.append("  - 离线/无结果")
             gap_note = (lit.get("gap_note") or "").strip()
@@ -375,12 +421,93 @@ def _render_report_md(dossier: Dossier) -> str:
         lines.append("（离线/无结果）")
     lines.append("")
 
+    lines.append("## 矛盾 / 缺口")
+    lines.append("")
+    _contradiction_rendered = False
+    if dossier.literature:
+        for lit in dossier.literature:
+            if not isinstance(lit, dict):
+                continue
+            gaps = _entry_gap_records(lit)
+            if not gaps:
+                continue
+            lines.append("- **query**：{}".format(_md_text(lit.get("query")) or "（未命名查询）"))
+            for g in gaps:
+                gtype = _md_text(g.get("type"))
+                label = _GAP_TYPE_LABELS.get(gtype, "缺口")
+                point = _md_text(g.get("claim_point")) or _md_text(g.get("angle")) or "（未命名结论点）"
+                lines.append("  - {} {}：{}".format(label, _md_text(g.get("gap_id")), point))
+                desc = _md_text(g.get("description"))
+                if desc:
+                    lines.append("    - {}".format(desc))
+                if gtype == "contradiction":
+                    refs = [t for t in (g.get("paper_refs") or []) if _md_text(t)]
+                    if refs:
+                        lines.append("    - 冲突双方：{}".format(" ⇄ ".join(refs)))
+                else:
+                    angle = _md_text(g.get("angle"))
+                    if angle and angle != point:
+                        lines.append("    - 缺口角度：{}".format(angle))
+            _contradiction_rendered = True
+    if not _contradiction_rendered:
+        lines.append("（无）")
+    lines.append("")
+
+    lines.append("## 假设")
+    lines.append("")
+    # 反向映射 hypothesis_id -> [idea_id]，标注「哪些 idea 由哪些假设而来」（可追溯）
+    _hyp_to_ideas: Dict[str, List[str]] = {}
+    for idea in dossier.ideas or []:
+        if not isinstance(idea, dict):
+            continue
+        iid = _md_text(idea.get("idea_id"))
+        if not iid:
+            continue
+        for href in (idea.get("hypothesis_refs") or []):
+            h = _md_text(href)
+            if h:
+                _hyp_to_ideas.setdefault(h, []).append(iid)
+    _hypothesis_rendered = False
+    if dossier.literature:
+        for lit in dossier.literature:
+            if not isinstance(lit, dict):
+                continue
+            hyps = _entry_hypothesis_records(lit)
+            if not hyps:
+                continue
+            lines.append("- **query**：{}".format(_md_text(lit.get("query")) or "（未命名查询）"))
+            for h in hyps:
+                hid = _md_text(h.get("hypothesis_id"))
+                lines.append("  - {}：{}".format(hid, _md_text(h.get("statement")) or "（无陈述）"))
+                gap_ref = _md_text(h.get("gap_ref"))
+                if gap_ref:
+                    lines.append("    - 来自 {}".format(gap_ref))
+                fals = _md_text(h.get("falsification"))
+                if fals:
+                    lines.append("    - 可证伪条件：{}".format(fals))
+                ideas = _hyp_to_ideas.get(hid) or []
+                if ideas:
+                    lines.append("    - 催生的 idea：{}".format("、".join(ideas)))
+            _hypothesis_rendered = True
+    if not _hypothesis_rendered:
+        lines.append("（无）")
+    lines.append("")
+
     lines.append("## 候选创新点")
     lines.append("")
     if dossier.ideas:
         for idea in dossier.ideas:
             lines.append("- **{}**：{}".format(idea.get("idea_id"), idea.get("claim") or ""))
             lines.append("  - novelty 假设：{}".format(idea.get("novelty_hypothesis") or ""))
+            gap_refs = [g for g in (idea.get("gap_refs") or []) if _md_text(g)]
+            if gap_refs:
+                lines.append("  - 来源缺口：{}".format("、".join(gap_refs)))
+            hyp_refs = [h for h in (idea.get("hypothesis_refs") or []) if _md_text(h)]
+            if hyp_refs:
+                lines.append("  - 来源假设：{}".format("、".join(hyp_refs)))
+            lit_refs = [t for t in (idea.get("literature_refs") or []) if _md_text(t)]
+            if lit_refs:
+                lines.append("  - 文献引用：{}".format("、".join(lit_refs)))
     else:
         lines.append("（无）")
     lines.append("")

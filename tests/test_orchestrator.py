@@ -368,5 +368,136 @@ class RenderReportNoveltyDimensionsTest(unittest.TestCase):
         self.assertNotIn("分维度明细", md)
 
 
+class RenderReportM9V2Test(unittest.TestCase):
+    """M9 v2：报告渲染 M5 v2 新字段（文献理解 / 矛盾图 / 假设 + idea 关联可追溯）。"""
+
+    def _dossier(self) -> Dossier:
+        d = Dossier()
+        d.meta["run_id"] = "run_test"
+        d.meta["llm_backend"] = "null"
+        return d
+
+    def _literature(self) -> list:
+        return [{
+            "query": "剩余寿命预测",
+            "papers": [
+                {
+                    "title": "LSTM RUL Prediction", "venue": "IEEE TII", "year": 2021,
+                    "source": "arxiv",
+                    "understanding": {
+                        "claim": "LSTM 可预测剩余寿命",
+                        "method": "LSTM",
+                        "conclusion": "优于传统基线",
+                        "applicability": "小样本时序数据",
+                        "limitations": "长序列退化",
+                    },
+                },
+                {
+                    "title": "Isolation Forest Anomaly Detection", "venue": "arXiv", "year": 2019,
+                    "source": "semantic_scholar",
+                    "understanding": {
+                        "claim": "孤立森林可做无监督异常检测",
+                        "method": "孤立森林",
+                        "conclusion": "无需标注",
+                        "applicability": "静态分布数据",
+                        "limitations": "数据漂移下失效",
+                    },
+                },
+            ],
+            "gap_note": "现有工作未覆盖数据漂移场景。",
+            "sources": ["arxiv", "semantic_scholar"],
+            "contradiction_graph": {
+                "nodes": [
+                    {"id": "p:0", "label": "LSTM RUL Prediction", "kind": "paper"},
+                    {"id": "p:1", "label": "Isolation Forest Anomaly Detection", "kind": "paper"},
+                ],
+                "edges": [],
+                "gaps": [
+                    {
+                        "gap_id": "g1", "type": "gap",
+                        "claim_point": "数据漂移下的剩余寿命预测",
+                        "description": "现有工作都假设静态分布，缺少数据漂移角度",
+                        "angle": "数据漂移", "paper_refs": [],
+                    },
+                    {
+                        "gap_id": "g2", "type": "contradiction",
+                        "claim_point": "异常检测是否需要标注",
+                        "description": "LSTM 方法需要标注，孤立森林无需标注",
+                        "angle": "",
+                        "paper_refs": ["LSTM RUL Prediction", "Isolation Forest Anomaly Detection"],
+                    },
+                ],
+            },
+            "hypotheses": [
+                {
+                    "hypothesis_id": "h1", "gap_ref": "g1",
+                    "statement": "若引入漂移自适应机制，则剩余寿命预测精度提升",
+                    "falsification": "精度无显著提升则证伪",
+                },
+                {
+                    "hypothesis_id": "h2", "gap_ref": "g2",
+                    "statement": "若采用半监督标注，则成本下降且精度保持",
+                    "falsification": "成本不降或精度下降则证伪",
+                },
+            ],
+        }]
+
+    def test_render_understanding_attached_to_papers(self):
+        d = self._dossier()
+        d.literature = self._literature()
+        md = orchestrator._render_report_md(d)
+        self.assertIn("## 文献检索结果", md)
+        for label in ("核心主张", "方法", "结论", "适用条件", "局限"):
+            self.assertIn(label, md)
+        self.assertIn("LSTM 可预测剩余寿命", md)
+        self.assertIn("孤立森林可做无监督异常检测", md)
+
+    def test_render_contradiction_graph(self):
+        d = self._dossier()
+        d.literature = self._literature()
+        md = orchestrator._render_report_md(d)
+        self.assertIn("## 矛盾 / 缺口", md)
+        self.assertIn("缺口 g1：数据漂移下的剩余寿命预测", md)
+        self.assertIn("矛盾 g2：异常检测是否需要标注", md)
+        self.assertIn("冲突双方：LSTM RUL Prediction ⇄ Isolation Forest Anomaly Detection", md)
+
+    def test_render_hypotheses_with_idea_traceability(self):
+        d = self._dossier()
+        d.literature = self._literature()
+        d.ideas = [{
+            "idea_id": "i1",
+            "claim": "漂移自适应剩余寿命预测方法",
+            "novelty_hypothesis": "现有工作未覆盖数据漂移",
+            "problem_ref": "p1",
+            "literature_refs": ["LSTM RUL Prediction"],
+            "gap_refs": ["g1"],
+            "hypothesis_refs": ["h1"],
+            "evidence": [],
+            "status": "pending_eval",
+        }]
+        md = orchestrator._render_report_md(d)
+        self.assertIn("## 假设", md)
+        self.assertIn("h1：若引入漂移自适应机制，则剩余寿命预测精度提升", md)
+        self.assertIn("可证伪条件：精度无显著提升则证伪", md)
+        self.assertIn("催生的 idea：i1", md)
+        # idea 段标注来源缺口/假设（关联可追溯）
+        self.assertIn("来源缺口：g1", md)
+        self.assertIn("来源假设：h1", md)
+
+    def test_render_m9v2_absent_fields_graceful(self):
+        """旧格式 literature（无 M5 v2 字段）不崩溃：矛盾/假设段显示（无）。"""
+        d = self._dossier()
+        d.literature = [{
+            "query": "某查询",
+            "papers": [{"title": "Plain Paper", "venue": "arXiv", "year": 2020}],
+            "gap_note": "gap",
+            "sources": ["arxiv"],
+        }]
+        md = orchestrator._render_report_md(d)
+        self.assertIn("## 矛盾 / 缺口", md)
+        self.assertIn("## 假设", md)
+        self.assertNotIn("核心主张", md)
+
+
 if __name__ == "__main__":
     unittest.main()
