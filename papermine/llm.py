@@ -8,14 +8,24 @@
 - HTTP 客户端使用 httpx（本项目唯一第三方依赖）。
 
 注意：本模块不依赖 jsonschema，内置一个覆盖本项目 Agent schema 需求的极简 JSON Schema 校验子集。
+
+M16 方向⑤：``DeepSeekProvider`` 支持 LLM 调用缓存（相同输入 → 复用输出）。缓存键含
+model + system + user + schema + temperature，故 prompt / schema 内容变化自动失效；仅缓存
+schema 校验成功的输出，失败（SchemaError / LLMError）不落缓存。``cache_dir=None``（默认）
+时关闭缓存，``get_provider`` 按需开启（目录 ``~/.papermine/llm_cache``）。
 """
 from __future__ import annotations
 
+import hashlib
 import json
+import os
+import time
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Protocol
 
 import httpx
 
+from . import storage
 from .config import get_llm_config
 
 __all__ = [
@@ -26,6 +36,7 @@ __all__ = [
     "NullProvider",
     "get_provider",
     "complete_fast",
+    "DEFAULT_LLM_CACHE_TTL",
 ]
 
 
@@ -166,6 +177,21 @@ def _parse_content(content: str) -> Dict[str, Any]:
     return data
 
 
+# ---------------------------------------------------------------------------
+# LLM 调用缓存（M16 方向⑤）：相同输入 → 复用输出
+# ---------------------------------------------------------------------------
+
+LLM_CACHE_SCHEMA = "llm_cache"
+LLM_CACHE_SCHEMA_VERSION = 1
+# 缓存 TTL：键已含 model+prompt+schema+temperature，30 天足够；过期自动失效回源
+DEFAULT_LLM_CACHE_TTL = 30 * 24 * 3600
+
+
+def _llm_cache_dir() -> Path:
+    """LLM 调用缓存目录：``~/.papermine/llm_cache``（``PAPERMINE_HOME`` 可覆盖）。"""
+    return storage.data_root() / "llm_cache"
+
+
 class DeepSeekProvider:
     """DeepSeek 实现：OpenAI 兼容 chat/completions + JSON mode + schema 校验重试。
 
@@ -178,7 +204,9 @@ class DeepSeekProvider:
     def __init__(self, api_key: str, base_url: str, model: str,
                  fast_model: Optional[str] = None,
                  timeout: float = 60.0, max_retries: int = 2,
-                 client: Optional[httpx.Client] = None) -> None:
+                 client: Optional[httpx.Client] = None,
+                 cache_dir: Optional[Path] = None,
+                 cache_ttl: Optional[float] = None) -> None:
         self.api_key = api_key
         self.base_url = base_url.rstrip("/")
         self.model = model
@@ -187,6 +215,9 @@ class DeepSeekProvider:
         self.max_retries = max_retries
         # 复用长连接 Client（连接池 + keep-alive + TLS 复用）；测试注入 MockTransport 时用之。
         self._client = client if client is not None else httpx.Client(timeout=timeout)
+        # M16 方向⑤：LLM 调用缓存。cache_dir=None 关闭（测试 / 显式直连）；否则启用。
+        self._cache_dir = Path(cache_dir) if cache_dir else None
+        self._cache_ttl = float(cache_ttl) if cache_ttl is not None else DEFAULT_LLM_CACHE_TTL
 
     def complete(self, system: str, user: str,
                  schema: dict, temperature: float = 0.2) -> dict:
@@ -200,7 +231,27 @@ class DeepSeekProvider:
 
     def _complete(self, model: str, system: str, user: str,
                   schema: dict, temperature: float) -> dict:
-        """按指定模型请求结构化输出并校验 schema；校验失败重试，仍失败抛 SchemaError。"""
+        """按指定模型请求结构化输出并校验 schema；校验失败重试，仍失败抛 SchemaError。
+
+        M16 方向⑤：启用缓存时，相同输入（model+system+user+schema+temperature）命中缓存
+        直接复用，不再重复调 LLM；仅缓存 schema 校验成功的输出，失败不落缓存。
+        """
+        cache_key: Optional[str] = None
+        if self._cache_dir is not None:
+            cache_key = self._cache_key(model, system, user, schema, temperature)
+            cached = self._cache_read(cache_key)
+            if cached is not None:
+                return cached
+
+        result = self._complete_uncached(model, system, user, schema, temperature)
+
+        if cache_key is not None:
+            self._cache_write(cache_key, result)
+        return result
+
+    def _complete_uncached(self, model: str, system: str, user: str,
+                           schema: dict, temperature: float) -> dict:
+        """不经过缓存的实际调用：JSON mode + schema 校验 + 重试（失败抛 LLMError/SchemaError）。"""
         last_err: Optional[SchemaError] = None
         for attempt in range(self.max_retries + 1):
             try:
@@ -221,6 +272,59 @@ class DeepSeekProvider:
                 )
             )
         raise last_err if last_err is not None else SchemaError("schema 校验失败")
+
+    # -- M16 缓存辅助 --
+    def _cache_key(self, model: str, system: str, user: str,
+                   schema: Dict[str, Any], temperature: float) -> str:
+        """缓存键：model + system + user + schema + temperature 的规范化 JSON 摘要。
+
+        键含全部影响输出的输入（prompt / schema 版本变更 → system / schema 文本变化 → 键变化），
+        故内容变化自动失效，无需显式清缓存；temperature 归一化为 float 避免 0 / 0.0 分键。
+        """
+        payload = {
+            "model": model,
+            "system": system,
+            "user": user,
+            "schema": schema,
+            "temperature": float(temperature),
+        }
+        raw = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+        return hashlib.sha1(raw.encode("utf-8")).hexdigest()
+
+    def _cache_path(self, key: str) -> Path:
+        return self._cache_dir / ("c_" + key + ".json")
+
+    def _cache_read(self, key: str) -> Optional[Dict[str, Any]]:
+        """命中且未过期返回缓存结果，否则 None；缓存损坏/过期视为 miss（静默回源）。"""
+        path = self._cache_path(key)
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        if not isinstance(data, dict):
+            return None
+        if time.time() - float(data.get("cached_at", 0)) > self._cache_ttl:
+            return None
+        result = data.get("result")
+        return result if isinstance(result, dict) else None
+
+    def _cache_write(self, key: str, result: Dict[str, Any]) -> None:
+        """写入缓存（原子替换）；失败静默，绝不影响主流程。"""
+        path = self._cache_path(key)
+        try:
+            self._cache_dir.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "_schema": LLM_CACHE_SCHEMA,
+                "_schema_version": LLM_CACHE_SCHEMA_VERSION,
+                "model": self.model,
+                "cached_at": time.time(),
+                "result": result,
+            }
+            tmp = path.with_name(path.name + ".tmp")
+            tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+            os.replace(tmp, path)
+        except OSError:
+            pass
 
     def _call_once(self, model: str, system: str, user: str,
                    schema: dict, temperature: float) -> Dict[str, Any]:
@@ -285,7 +389,10 @@ class NullProvider:
 # ---------------------------------------------------------------------------
 
 def get_provider() -> LLMProvider:
-    """读 config（papermine/config.py）：无 api_key 返回 NullProvider，否则返回 DeepSeekProvider。"""
+    """读 config（papermine/config.py）：无 api_key 返回 NullProvider，否则返回 DeepSeekProvider。
+
+    M16 方向⑤：有 key 时启用 LLM 调用缓存（``~/.papermine/llm_cache``），相同输入复用输出。
+    """
     cfg = get_llm_config()
     api_key = cfg.get("api_key", "")
     if not api_key:
@@ -295,4 +402,5 @@ def get_provider() -> LLMProvider:
         base_url=cfg.get("base_url", "https://api.deepseek.com"),
         model=cfg.get("model", "deepseek-chat"),
         fast_model=cfg.get("fast_model") or cfg.get("model", "deepseek-chat"),
+        cache_dir=_llm_cache_dir(),
     )

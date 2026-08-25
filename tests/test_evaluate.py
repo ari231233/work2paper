@@ -9,8 +9,12 @@ M12 增量：每条 evaluation 附带 ``evidence_validation``（证据强度 wea
 """
 from __future__ import annotations
 
+import os
+import threading
+import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from papermine.agents.evaluate import (
     EVALUATE_SCHEMA,
@@ -170,6 +174,14 @@ def _assert_evidence_validation(self, evv):
 
 
 class RunTest(unittest.TestCase):
+    def setUp(self) -> None:
+        # M16 并行默认开启；_FakeLLM 是按序队列的 stub（非线程安全），此处强制顺序执行以保持确定性。
+        self._parallel_patch = mock.patch.dict(os.environ, {"PAPERMINE_PARALLEL": "0"})
+        self._parallel_patch.start()
+
+    def tearDown(self) -> None:
+        self._parallel_patch.stop()
+
     def test_run_null_llm_writes_evaluations_with_verdict(self) -> None:
         d = _dossier()
         run(d, NullProvider())
@@ -469,6 +481,67 @@ class SampleAcceptanceTest(unittest.TestCase):
             # M12 验收：每个 idea 输出证据强度 + 理由
             _assert_evidence_validation(self, ev["evidence_validation"])
             self.assertIn(ev["evidence_validation"]["evidence"], EVIDENCE_LEVELS)
+
+
+class _ConcurrentEvalLLM:
+    """线程安全的评估/证据 LLM stub：批量 schema 返回空（触发逐条回退），单条按 schema 分派并统计并发。"""
+
+    def __init__(self, sleep=0.05):
+        self._lock = threading.Lock()
+        self.active = 0
+        self.max_active = 0
+        self._sleep = sleep
+
+    def _touch(self):
+        with self._lock:
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+
+    def _release(self):
+        with self._lock:
+            self.active -= 1
+
+    def _dispatch(self, schema):
+        self._touch()
+        try:
+            time.sleep(self._sleep)
+            props = (schema or {}).get("properties") or {}
+            if "evaluations" in props:
+                return {"evaluations": []}          # 批量评估失败 → 逐条回退
+            if "results" in props:
+                return {"results": []}              # 批量证据失败 → 逐条回退
+            if "checks" in props and "evidence" in props:
+                return _llm_evidence(evidence="strong", reason="证据充分")
+            return _llm_eval(dims=_dims(), workload=60, suggestion="proceed")
+        finally:
+            self._release()
+
+    def complete(self, system, user, schema, temperature=0.2):
+        return self._dispatch(schema)
+
+    def complete_fast(self, system, user, schema, temperature=0.2):
+        return self._dispatch(schema)
+
+
+class ParallelEvaluateTest(unittest.TestCase):
+    """M16 方向⑥：多个 idea 的评估并行执行（批量失败回退逐条时并行提速，结果保序）。"""
+
+    def test_per_idea_fallback_evaluates_in_parallel(self):
+        ideas = [
+            {"idea_id": "i{}".format(n), "claim": "改进方法 {}".format(n),
+             "novelty_hypothesis": "假设有效", "problem_ref": "p1",
+             "literature_refs": [], "status": "pending_eval"}
+            for n in range(1, 4)
+        ]
+        d = _dossier(ideas=ideas)
+        llm = _ConcurrentEvalLLM()
+        run(d, llm)
+
+        self.assertEqual(len(d.evaluations), 3)
+        self.assertEqual([ev["idea_ref"] for ev in d.evaluations], ["i1", "i2", "i3"])
+        for ev in d.evaluations:
+            self.assertIn(ev["verdict"], ("proceed", "rework", "drop"))
+        self.assertGreater(llm.max_active, 1)   # 证明并行（多线程同时调用）
 
 
 if __name__ == "__main__":

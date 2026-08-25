@@ -277,3 +277,96 @@ def test_validate_schema_enum_and_additional_properties():
     assert _validate_schema(schema, {"verdict": "proceed"}) == []
     assert _validate_schema(schema, {"verdict": "maybe"}) != []
     assert _validate_schema(schema, {"verdict": "proceed", "extra": 1}) != []
+
+
+# ---------------------------------------------------------------------------
+# M16 方向⑤：LLM 调用缓存（相同输入 → 复用输出）
+# ---------------------------------------------------------------------------
+
+def test_cache_reuses_output_for_identical_input(tmp_path):
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        return _ok_json({"title": "你好"})
+
+    provider = DeepSeekProvider("sk", "https://api.deepseek.com", "deepseek-chat",
+                                client=_client(handler), cache_dir=tmp_path)
+    assert provider.complete("sys", "user", SCHEMA) == {"title": "你好"}
+    assert provider.complete("sys", "user", SCHEMA) == {"title": "你好"}
+    assert len(calls) == 1   # 第二次命中缓存，不再发起 HTTP
+
+
+def test_cache_differentiates_inputs(tmp_path):
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        return _ok_json({"title": "x"})
+
+    provider = DeepSeekProvider("sk", "https://api.deepseek.com", "deepseek-chat",
+                                client=_client(handler), cache_dir=tmp_path)
+    provider.complete("sys", "user1", SCHEMA)
+    provider.complete("sys", "user2", SCHEMA)
+    assert len(calls) == 2
+
+
+def test_cache_persists_across_instances(tmp_path):
+    first = DeepSeekProvider("sk", "https://api.deepseek.com", "deepseek-chat",
+                             client=_client(lambda r: _ok_json({"title": "a"})),
+                             cache_dir=tmp_path)
+    first.complete("sys", "user", SCHEMA)
+
+    second = DeepSeekProvider("sk", "https://api.deepseek.com", "deepseek-chat",
+                              client=_client(lambda r: _ok_json({"title": "b"})),
+                              cache_dir=tmp_path)
+    # 第二个实例命中第一个实例写入的缓存，不再发起 HTTP
+    assert second.complete("sys", "user", SCHEMA) == {"title": "a"}
+
+
+def test_no_cache_when_cache_dir_none():
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        return _ok_json({"title": "x"})
+
+    provider = DeepSeekProvider("sk", "https://api.deepseek.com", "deepseek-chat",
+                                client=_client(handler))
+    provider.complete("sys", "user", SCHEMA)
+    provider.complete("sys", "user", SCHEMA)
+    assert len(calls) == 2   # 未启用缓存 → 每次都调 HTTP
+
+
+def test_failed_call_not_cached(tmp_path):
+    provider = DeepSeekProvider("sk", "https://api.deepseek.com", "deepseek-chat",
+                                client=_client(lambda r: _ok_json({"bad": 1})),
+                                cache_dir=tmp_path)
+    with pytest.raises(SchemaError):
+        provider.complete("sys", "user", SCHEMA)
+    assert list(tmp_path.glob("c_*.json")) == []   # 失败不落缓存
+
+
+def test_cache_key_includes_temperature(tmp_path):
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        return _ok_json({"title": "x"})
+
+    provider = DeepSeekProvider("sk", "https://api.deepseek.com", "deepseek-chat",
+                                client=_client(handler), cache_dir=tmp_path)
+    provider.complete("sys", "user", SCHEMA, temperature=0.0)
+    provider.complete("sys", "user", SCHEMA, temperature=0.5)
+    assert len(calls) == 2   # 不同 temperature → 不同键
+
+
+def test_get_provider_enables_cache_dir(monkeypatch, tmp_path):
+    monkeypatch.setenv("PAPERMINE_HOME", str(tmp_path))
+    monkeypatch.setattr(
+        llm, "get_llm_config",
+        lambda: {"api_key": "sk-1", "base_url": "https://api.deepseek.com", "model": "deepseek-chat"},
+    )
+    provider = get_provider()
+    assert isinstance(provider, DeepSeekProvider)
+    assert provider._cache_dir == tmp_path / "llm_cache"

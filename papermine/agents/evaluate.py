@@ -39,6 +39,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from ..dossier import Dossier
 from ..llm import LLMError, LLMProvider, SchemaError
+from ..parallel import map_parallel
 from .evidence import CHECK_DIMENSIONS, validate_evidence, validate_evidence_batch
 
 __all__ = [
@@ -775,7 +776,8 @@ def run(dossier: Dossier, llm: LLMProvider) -> None:
     assets = dossier.assets if isinstance(dossier.assets, dict) else {}
     facts = assets.get("facts") if isinstance(assets.get("facts"), dict) else {}
     literature = list(dossier.literature or [])
-    ideas = list(dossier.ideas or [])
+    ideas = [i for i in (dossier.ideas or [])
+             if isinstance(i, dict) and (i.get("idea_id") or "").strip()]
 
     gap_notes = _all_gap_notes(literature)
     venue_dist = _venue_distribution(literature)
@@ -788,17 +790,18 @@ def run(dossier: Dossier, llm: LLMProvider) -> None:
     eval_batch = _call_llm_batch(llm, system_prompt, ideas, gap_notes, venue_summary, facts)
     evidence_batch = validate_evidence_batch(ideas, literature, llm, facts)
 
-    evaluations: List[dict] = []
-    for idea in ideas:
-        if not isinstance(idea, dict) or not (idea.get("idea_id") or "").strip():
-            continue
+    def _eval_one(idea: dict) -> dict:
         idea_id = str(idea.get("idea_id") or "").strip()
-        evaluations.append(_evaluate_idea(
+        return _evaluate_idea(
             idea, facts, gap_notes, venue_dist, venue_summary,
             data_feasibility, literature, llm, system_prompt,
             llm_out=eval_batch.get(idea_id) if eval_batch else None,
             ev_validation=evidence_batch.get(idea_id) if evidence_batch else None,
-        ))
+        )
+
+    # M16 方向⑥：多个 idea 的评估并行执行（结果保持 idea 顺序）。
+    # 批量命中时各 idea 仅做确定性装配（无 LLM 调用）；批量缺失回退逐条调用时并行提速。
+    evaluations = map_parallel(_eval_one, ideas)
 
     dossier.evaluations = evaluations
     dossier.meta.setdefault("prompt_versions", {})["evaluate"] = version

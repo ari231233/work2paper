@@ -26,6 +26,7 @@ import json
 from typing import Any, Dict, List, Optional, Tuple
 
 from .llm import LLMError, LLMProvider, SchemaError
+from .parallel import map_parallel
 
 __all__ = [
     "analyze_literature",
@@ -442,16 +443,6 @@ def _build_graph(papers: List[Dict[str, Any]], gaps: List[Dict[str, str]],
     return {"nodes": nodes, "edges": edges, "gaps": gap_records}
 
 
-def _mine_entry(entry: Dict[str, Any], papers: List[Dict[str, Any]],
-                llm: Optional[LLMProvider], start_id: int) -> Dict[str, Any]:
-    if not papers:
-        return {"nodes": [], "edges": [], "gaps": []}
-    gaps, conts = _mine_with_llm(entry, papers, llm)
-    if gaps is None or conts is None:
-        gaps, conts = _mine_deterministic(entry, papers)
-    return _build_graph(papers, gaps, conts, start_id)
-
-
 # ---------------------------------------------------------------------------
 # ③ 假设生成（if-then 可证伪假设）
 # ---------------------------------------------------------------------------
@@ -513,12 +504,16 @@ def _hypothesize_with_llm(entry: Dict[str, Any], gaps: List[Dict[str, Any]],
     return out
 
 
-def _hypothesize_entry(entry: Dict[str, Any], gaps: List[Dict[str, Any]],
-                       llm: Optional[LLMProvider], start_id: int) -> List[Dict[str, Any]]:
-    """为每条 gap 生成一条假设（LLM 命中用 LLM，否则确定性），hypothesis_id 全局唯一。"""
+def _finalize_hypotheses(gaps: List[Dict[str, Any]],
+                         statements: Optional[List[Dict[str, str]]],
+                         start_id: int) -> List[Dict[str, Any]]:
+    """把 LLM/确定性产出的假设语句按 gap 顺序装配，赋全局唯一 hypothesis_id。
+
+    - ``statements`` 为 None（LLM 失败/无 LLM）或某条缺失/非法时，该条退化为确定性 if-then；
+    - ``hypothesis_id`` 从 ``start_id`` 起递增，``gap_ref`` 回指对应 gap 的 ``gap_id``。
+    """
     if not gaps:
         return []
-    statements = _hypothesize_with_llm(entry, gaps, llm)
     out: List[Dict[str, Any]] = []
     for i, gap in enumerate(gaps):
         stmt = statements[i] if (statements is not None and i < len(statements)) else None
@@ -559,25 +554,50 @@ def analyze_literature(literature: List[dict], llm: LLMProvider) -> List[dict]:
     - gap_id / hypothesis_id 全局唯一（跨条目不重号），供 idea 追溯引用。
 
     无 LLM / 异常时退化为确定性规则，绝不抛异常。
+
+    M16 方向⑥：①理解 + ②挖掘（跨条目独立）与③假设生成（跨条目独立）**并行执行**；
+    赋全局唯一 gap_id / hypothesis_id 的两步为顺序（纯确定性、无网络 I/O），保证编号
+    严格按「条目序 + 条目内序」可复现。
     """
-    gap_counter = 0
-    hyp_counter = 0
-    for entry in literature or []:
-        if not isinstance(entry, dict):
-            continue
+    entries = [e for e in (literature or []) if isinstance(e, dict)]
+    if not entries:
+        return literature
+
+    # ① 文献理解 + ② 矛盾/gap 挖掘：跨条目不共享状态 → 并行。
+    def _understand_and_mine(entry: Dict[str, Any]) -> Tuple[List[Dict[str, Any]],
+                                                              List[Dict[str, str]],
+                                                              List[Dict[str, str]]]:
         papers = [p for p in (entry.get("papers") or []) if isinstance(p, dict)]
-
-        # ① 文献理解
         _understand_entry(entry, papers, llm)
+        gaps, conts = _mine_with_llm(entry, papers, llm)
+        if gaps is None or conts is None:
+            gaps, conts = _mine_deterministic(entry, papers)
+        return papers, gaps, conts
 
-        # ② 矛盾/gap 挖掘
-        graph = _mine_entry(entry, papers, llm, start_id=gap_counter)
+    mined = map_parallel(_understand_and_mine, entries)
+
+    # 顺序赋全局唯一 gap_id（确定性，无网络 I/O）。
+    gap_counter = 0
+    for entry, (papers, gaps, conts) in zip(entries, mined):
+        graph = _build_graph(papers, gaps, conts, start_id=gap_counter)
         entry["contradiction_graph"] = graph
-        gaps = graph.get("gaps") or []
-        gap_counter += len(gaps)
+        gap_counter += len(graph.get("gaps") or [])
 
-        # ③ 假设生成
-        hypotheses = _hypothesize_entry(entry, gaps, llm, start_id=hyp_counter)
+    # ③ 假设生成：跨条目不共享状态 → 并行（用已赋的 gap_id）。
+    def _hypothesize(entry: Dict[str, Any]) -> Tuple[List[Dict[str, Any]],
+                                                     Optional[List[Dict[str, str]]]]:
+        graph = entry.get("contradiction_graph") or {}
+        gaps = [g for g in (graph.get("gaps") or [])
+                if isinstance(g, dict) and g.get("gap_id")]
+        statements = _hypothesize_with_llm(entry, gaps, llm)
+        return gaps, statements
+
+    hypothesized = map_parallel(_hypothesize, entries)
+
+    # 顺序赋全局唯一 hypothesis_id（确定性）。
+    hyp_counter = 0
+    for entry, (gaps, statements) in zip(entries, hypothesized):
+        hypotheses = _finalize_hypotheses(gaps, statements, start_id=hyp_counter)
         entry["hypotheses"] = hypotheses
         hyp_counter += len(hypotheses)
 

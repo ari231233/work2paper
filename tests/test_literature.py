@@ -5,6 +5,8 @@
 """
 from __future__ import annotations
 
+import threading
+import time
 import unittest
 
 from papermine import literature
@@ -182,6 +184,46 @@ class AnalyzeLiteratureLLMTest(unittest.TestCase):
         graph = lit[0]["contradiction_graph"]
         self.assertEqual(graph["edges"], [])
         self.assertEqual([g for g in graph["gaps"] if g["type"] == "contradiction"], [])
+
+
+class _ConcurrentStubLLM:
+    """线程安全的 LLM stub：返回空 dict（触发确定性降级），并统计最大并发调用数。"""
+
+    def __init__(self, sleep=0.05):
+        self._lock = threading.Lock()
+        self.active = 0
+        self.max_active = 0
+        self._sleep = sleep
+
+    def complete(self, system, user, schema, temperature=0.2):
+        with self._lock:
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+        try:
+            time.sleep(self._sleep)
+            return {}
+        finally:
+            with self._lock:
+                self.active -= 1
+
+
+class AnalyzeLiteratureParallelTest(unittest.TestCase):
+    """M16 方向⑥：多篇论文（多条文献条目）的理解/挖掘/假设生成跨条目并行，ID 仍全局唯一可复现。"""
+
+    def test_parallel_across_entries_preserves_global_ids(self):
+        lit = [
+            _entry([_paper("Paper A")]),
+            _entry([_paper("Paper B")]),
+            _entry([_paper("Paper C")]),
+        ]
+        llm = _ConcurrentStubLLM()
+        analyze_literature(lit, llm)
+
+        self.assertGreater(llm.max_active, 1)   # 证明跨条目并行
+        gap_ids = [g["gap_id"] for e in lit for g in e["contradiction_graph"]["gaps"]]
+        hyp_ids = [h["hypothesis_id"] for e in lit for h in e["hypotheses"]]
+        self.assertEqual(gap_ids, ["g1", "g2", "g3"])
+        self.assertEqual(hyp_ids, ["h1", "h2", "h3"])
 
 
 if __name__ == "__main__":
