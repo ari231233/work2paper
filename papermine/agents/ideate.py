@@ -1,13 +1,17 @@
 """③ 知识检索 + ④ 创新点生成 Agent：problems + literature -> dossier.ideas。
 
-对应 docs/build-plan.md §4 M5 与 docs/architecture.md §5 ③④：
+对应 docs/build-plan.md §4 M5 / M5 v2 与 docs/architecture.md §5 ③④：
 
 - **③ 检索编排**：从 ``dossier.problems`` 派生查询，调 ``retrieval.search_literature``
   写 ``dossier.literature``（含查询改写循环 + 缓存 + 降级）。
-- **④ 创新点生成**：problems + literature（+ facts 兜底）→ ``dossier.ideas``。
+- **③½ 文献理解/矛盾挖掘/假设生成（M5 v2）**：调 ``literature.analyze_literature``，
+  给每篇论文附结构化理解、每条文献条目附 ``contradiction_graph``（gap/矛盾）与
+  ``hypotheses``（if-then 可证伪假设）。
+- **④ 创新点生成**：problems + literature（含 gap/假设，+ facts 兜底）→ ``dossier.ideas``。
 - **关键约束**（architecture §5 ④）：每个 idea 必须引用 ``literature_refs`` 并写
   ``novelty_hypothesis``；``literature_refs`` 只允许引用真实检索到的论文标题，
-  禁止编造引用（academic integrity）。
+  禁止编造引用（academic integrity）。M5 v2 追加：每个 idea 必须追溯其来源 gap/矛盾
+  （``gap_refs`` + ``hypothesis_refs`` + ``evidence`` 里挂 ``literature.contradiction_graph``）。
 
 降级路径（architecture §7 / §8）：
 无 key（NullProvider 返回空）、网络失败（LLMError）、schema 失败（SchemaError）时，
@@ -26,6 +30,7 @@ from typing import Any, Dict, List
 
 from .. import storage
 from ..dossier import Dossier
+from ..literature import _entry_gaps, _entry_hypotheses, analyze_literature
 from ..llm import LLMError, LLMProvider, SchemaError
 from ..retrieval import search_literature
 
@@ -39,7 +44,7 @@ __all__ = [
 ]
 
 # 本 Agent prompt 版本：单一事实源 = prompts/ideate.md 的 `<!-- version: N -->` 头
-_PROMPT_VERSION = "v1"
+_PROMPT_VERSION = "v2"
 _PROMPT_FILE = Path(__file__).resolve().parent.parent / "prompts" / "ideate.md"
 
 # 派生查询的数量上限（控制 API 调用预算）
@@ -69,9 +74,10 @@ IDEA_SCHEMA: Dict[str, Any] = {
 }
 
 _FALLBACK_SYSTEM = (
-    "你是 papermine 的「创新点生成 Agent」。输入是研究问题、检索到的文献与项目事实，"
-    "输出候选创新点。每个创新点必须引用 literature_refs（只许用给定文献中真实存在的论文标题，"
-    "禁止编造）并写 novelty_hypothesis，且挂 problem_ref。只输出 JSON，严格满足给定 schema。"
+    "你是 papermine 的「创新点生成 Agent」。输入是研究问题、检索到的文献（含结构化理解、"
+    "矛盾/gap、可证伪假设）与项目事实，输出候选创新点。每个创新点应优先从给定的 gap/矛盾"
+    "里生长出来，引用 literature_refs（只许用给定文献中真实存在的论文标题，禁止编造）并写 "
+    "novelty_hypothesis，且挂 problem_ref。只输出 JSON，严格满足给定 schema。"
 )
 
 
@@ -147,7 +153,13 @@ def _build_user_prompt(problems: List[dict], literature: List[dict],
             for p in (e.get("papers") or [])
             if isinstance(p, dict)
         ]
-        lit.append({"query": e.get("query", ""), "gap_note": e.get("gap_note", ""), "papers": papers})
+        lit.append({
+            "query": e.get("query", ""),
+            "gap_note": e.get("gap_note", ""),
+            "papers": papers,
+            "gaps": _entry_gaps(e),
+            "hypotheses": _entry_hypotheses(e),
+        })
     payload = {"problems": problems, "literature": lit, "facts": facts}
     return (
         "以下是研究问题、检索到的文献与项目事实，请据此生成候选创新点：\n"
@@ -255,6 +267,13 @@ def _finalize_ideas(raw: List[dict], problems: List[dict], literature: List[dict
     real_titles = {t for ts in titles_by_entry for t in ts}
     all_titles = [t for ts in titles_by_entry for t in ts]
 
+    # M5 v2：gap/矛盾与假设的追溯映射（gap_id/hypothesis_id 全局唯一，按文献条目归组）
+    gaps_by_entry = [[g["gap_id"] for g in _entry_gaps(e)] for e in (literature or [])]
+    hyps_by_entry = [[h["hypothesis_id"] for h in _entry_hypotheses(e)] for e in (literature or [])]
+    all_gap_ids = [gid for gids in gaps_by_entry for gid in gids]
+    all_hyp_ids = [hid for hids in hyps_by_entry for hid in hids]
+    gap_by_id = {g["gap_id"]: g for e in (literature or []) for g in _entry_gaps(e)}
+
     out: List[dict] = []
     seen_claims: set = set()
     for r in raw or []:
@@ -282,12 +301,37 @@ def _finalize_ideas(raw: List[dict], problems: List[dict], literature: List[dict
             candidate = titles_by_entry[idx] if 0 <= idx < len(titles_by_entry) else all_titles
             refs = list(candidate[:2])
 
+        # M5 v2：确定该 idea 的来源 gap/假设（按 problem 对应的文献条目归组，缺失时兜底全量）
+        idx = problem_ids.index(problem_ref) if problem_ref in problem_ids else -1
+        gap_refs = list(gaps_by_entry[idx]) if 0 <= idx < len(gaps_by_entry) else []
+        if not gap_refs:
+            gap_refs = list(all_gap_ids[:2])
+        hyp_refs = list(hyps_by_entry[idx]) if 0 <= idx < len(hyps_by_entry) else []
+        if not hyp_refs:
+            hyp_refs = list(all_hyp_ids[:2])
+
+        # evidence 追溯来源 gap/矛盾（provenance 强制，验收点 3）
+        evidence: List[dict] = []
+        for gid in gap_refs:
+            gap = gap_by_id.get(gid)
+            if not gap:
+                continue
+            evidence.append({
+                "source": "literature.contradiction_graph",
+                "gap_id": gid,
+                "type": gap.get("type"),
+                "note": (gap.get("description") or "")[:200],
+            })
+
         out.append({
             "idea_id": "i{}".format(len(out) + 1),
             "claim": claim,
             "novelty_hypothesis": hypothesis,
             "problem_ref": problem_ref,
             "literature_refs": refs,
+            "gap_refs": gap_refs,
+            "hypothesis_refs": hyp_refs,
+            "evidence": evidence,
             "status": "pending_eval",
         })
     return out
@@ -329,6 +373,9 @@ def run(dossier: Dossier, llm: LLMProvider) -> None:
     cache_dir = storage.layout()["literature_cache"]
     dossier.literature = search_literature(queries, cache_dir, llm)
 
-    # ---- ④ 创新点生成 ----
+    # ---- ③½ 文献理解 + 矛盾/gap 挖掘 + 假设生成（M5 v2）----
+    analyze_literature(dossier.literature, llm)
+
+    # ---- ④ 创新点生成（复用 gap/矛盾与假设）----
     dossier.ideas = _generate_ideas(problems, dossier.literature, facts, llm, system)
     dossier.meta.setdefault("prompt_versions", {})["ideate"] = version

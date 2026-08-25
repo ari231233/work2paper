@@ -90,7 +90,7 @@ class IdeateAgentTest(unittest.TestCase):
             self.assertIn("problem_ref", idea)
             self.assertIsInstance(idea["literature_refs"], list)
             self.assertEqual(idea["status"], "pending_eval")
-        self.assertEqual(d.meta["prompt_versions"]["ideate"], "v1")
+        self.assertEqual(d.meta["prompt_versions"]["ideate"], "v2")
 
     def test_run_with_literature_cites_real_papers(self):
         d = _dossier()
@@ -200,6 +200,56 @@ class FinalizeIdeasTest(unittest.TestCase):
         self.assertEqual(IDEA_SCHEMA["required"], ["ideas"])
         req = IDEA_SCHEMA["properties"]["ideas"]["items"]["required"]
         self.assertEqual(req, ["claim", "novelty_hypothesis", "problem_ref", "literature_refs"])
+
+
+class IdeateM5V2Test(unittest.TestCase):
+    """M5 v2：文献理解 + 矛盾/gap 挖掘 + 假设生成 → idea 追溯来源。"""
+
+    def test_run_enriches_literature_with_gaps_and_hypotheses(self):
+        d = _dossier()
+        literature = [_literature_entry([_paper("Paper A"), _paper("Paper B", "semantic_scholar")])]
+        with mock.patch.object(ideate, "search_literature", return_value=literature):
+            run(d, NullProvider())
+        self.assertEqual(len(d.literature), 1)
+        entry = d.literature[0]
+        self.assertIn("contradiction_graph", entry)
+        self.assertIn("hypotheses", entry)
+        for p in entry["papers"]:
+            self.assertIn("understanding", p)
+            self.assertTrue(p["understanding"]["claim"])
+        gaps = entry["contradiction_graph"]["gaps"]
+        self.assertGreaterEqual(len(gaps), 1)
+        self.assertGreaterEqual(len(entry["hypotheses"]), 1)
+        # 每条假设都能回指一条 gap
+        for h in entry["hypotheses"]:
+            self.assertIn(h["gap_ref"], [g["gap_id"] for g in gaps])
+
+    def test_ideas_reference_source_gap_and_hypothesis(self):
+        d = _dossier()
+        literature = [_literature_entry([_paper("Paper A")])]
+        with mock.patch.object(ideate, "search_literature", return_value=literature):
+            run(d, NullProvider())
+        for idea in d.ideas:
+            self.assertIn("gap_refs", idea)
+            self.assertIn("hypothesis_refs", idea)
+            self.assertIn("evidence", idea)
+        self.assertTrue(any(i["gap_refs"] for i in d.ideas))
+        self.assertTrue(any(i["hypothesis_refs"] for i in d.ideas))
+        cited = [i for i in d.ideas if i["gap_refs"]]
+        self.assertTrue(cited)
+        ev = cited[0]["evidence"]
+        self.assertTrue(any(e.get("source") == "literature.contradiction_graph" for e in ev))
+        self.assertTrue(any(e.get("gap_id") for e in ev))
+
+    def test_offline_no_literature_still_graceful(self):
+        d = _dossier()
+        with mock.patch.object(ideate, "search_literature", return_value=[]):
+            run(d, NullProvider())
+        self.assertGreaterEqual(len(d.ideas), 2)
+        for idea in d.ideas:
+            self.assertEqual(idea["gap_refs"], [])
+            self.assertEqual(idea["hypothesis_refs"], [])
+            self.assertEqual(idea["evidence"], [])
 
 
 if __name__ == "__main__":
