@@ -352,6 +352,24 @@ def run(dossier: Dossier, llm: LLMProvider) -> None
 - **依赖**：M5（文献检索，提供对拍依据）+ M11（多维 novelty 评分，维度可复用）。
 - **验收**：对 sample 项目，每个 idea 输出 `evidence` 强度 + `reason`。
 
+### M13 — Agent Trace（执行轨迹记录）
+
+- **目标**：记录每一次 Agent 执行轨迹（起止时间 / 耗时 / LLM 调用 / HTTP 调用），用于发现哪些环节拖慢运行速度。
+- **产出**：`papermine/trace.py`（轻量记录器）+ orchestrator 集成 + 单测。
+- **存储**：`~/.papermine/runs/<run_id>/trace.jsonl`（每行一条轨迹事件，append-only）。
+- **记录内容**：
+  1. 每个 Agent 的 start/end 时间戳 + 耗时（含 M5 v2 子步骤 / M12 / M8 v2）。
+  2. 每个 LLM 调用的耗时 + 模型 + token 数（如可获取）。
+  3. 每个 HTTP 检索调用的耗时。
+  4. 回炉 / 降级 / 超时等异常信号。
+- **要点**：
+  1. 轻量零侵入：用 context manager / 装饰器包裹各 Agent 的 `run()`，不改现有接口契约。
+  2. 提供 `papermine trace <run_id>` 子命令：按耗时排序汇总各环节，定位瓶颈。
+- **验收**：
+  1. 单测 + 冒烟不回归；
+  2. 跑一次 analyze，`trace.jsonl` 能看到各 Agent 耗时；
+  3. `papermine trace <run_id>` 能输出「哪个环节最慢」的排序。
+
 ---
 
 ## 5. 全部完成后的集成收尾（一个框或本框）
