@@ -421,6 +421,32 @@ def run(dossier: Dossier, llm: LLMProvider) -> None
   3. 下游 M11（Gap 维度）+ M12（文献对拍）消费 `evidence_level`：weak 时 novelty / 证据强度打折。
 - **验收**：gap 输出均为「假设」形式（"基于 N 篇论文未发现…"），无全称断言（如"领域无人做"）；evidence_level 正确反映证据量。
 
+### M19 — Paper Evidence Card（论文级证据卡）【第二优先】
+
+- **目标**：把 M5 v2 的「文献理解」从 abstract 级升级为「论文级证据卡」，让 novelty 判断有真实依据（baseline / dataset / metric / gain / limitation）。
+- **关键原则**：每个字段必须能溯源（`evidence_source`）；提取不到的字段**标 null，禁止 LLM 编造**（否则 novelty 会漂）。
+- **schema**（每篇论文固定）：
+  ```json
+  {
+    "title": "",
+    "dataset": "",
+    "baseline": "",
+    "metric": "",
+    "main_gain": "",
+    "limitation": "",
+    "claim_strength": "",
+    "evidence_source": "abstract | fulltext | table"
+  }
+  ```
+- **要点**：
+  1. 从 abstract 提取能提取的字段（dataset / baseline / metric / gain 常在 abstract 里出现）。
+  2. 提取不到的字段标 `null`，绝不编造。
+  3. `evidence_source` 标明证据来源层级：abstract = 弱证据，fulltext / table = 强证据。
+  4. 下游 M11 / M12 消费这些字段：null 字段要反映到 novelty / 证据强度（不能拿「没提取到」当「没有」）。
+  5. 与 M18 的关系：`evidence_source` 是 M18 的 `evidence_level` 的底层输入——论文级证据卡的来源层级，决定了 gap 假设的证据级别。
+- **硬约束**：当前检索（arXiv + Semantic Scholar）只给 abstract，故第一版 `evidence_source` 大概率全是 `abstract`；fulltext / table 需后续「全文下载 + 表格解析」另立项。
+- **验收**：每篇论文有证据卡，字段要么有值要么 null，`evidence_source` 正确，无编造的 baseline / gain。
+
 ---
 
 ## 5. 全部完成后的集成收尾（一个框或本框）
