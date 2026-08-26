@@ -447,6 +447,16 @@ def run(dossier: Dossier, llm: LLMProvider) -> None
 - **硬约束**：当前检索（arXiv + Semantic Scholar）只给 abstract，故第一版 `evidence_source` 大概率全是 `abstract`；fulltext / table 需后续「全文下载 + 表格解析」另立项。
 - **验收**：每篇论文有证据卡，字段要么有值要么 null，`evidence_source` 正确，无编造的 baseline / gain。
 
+### M19 v2 — 证据卡抽取修正（正向约束防过度保守）【第一优先】
+
+- **目标**：修复 M19 的 LLM 过度保守问题——摘要里**明确提到**的数据集 / 指标 / baseline / gain（如 SWaT、WADI、accuracy、F1、precision、recall、outperform）被误判成 null（实测 11 篇里至少 7 篇摘要明确提到，但字段全 null）。
+- **根因**：M19 的「禁止编造 → 摘要未明确给出就 null」铁律让 LLM 过度保守，把"摘要明确提到的信息"也判成了 null。
+- **改动**：
+  1. 抽取指令加**正向约束**：摘要中明确出现的数据集名 / 指标名 / baseline / gain **必须提取**；只有摘要里完全没有相关信息的字段才标 null。
+  2. 把「默认 null」掰成「默认提取，提取不到才 null」。
+  3. 验收用**正向对照**：对明确提到 SWaT / WADI / accuracy / F1 的论文，其 evidence_card 对应字段必须非空。
+- **验收**：对 sample 项目，摘要明确提到数据集/指标的论文，对应字段非空；只有摘要真没提的字段才 null。
+
 ### M20 — Score Calibration（评分校准）【第二优先】
 
 - **目标**：把 M11 的 novelty 各维度从「LLM 自由打分」改为「规则 + LLM 解释」——每个分数都有明确来源（回答了哪些问题、规则怎么算），而非看似科学的任意数字。
