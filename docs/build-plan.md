@@ -403,6 +403,24 @@ def run(dossier: Dossier, llm: LLMProvider) -> None
 - **产出**：改造各 agent 的上下文构造 + 单测。
 - **验收**：单次 LLM 调用的输入 token 下降；耗时下降。
 
+### M18 — Evidence Level（gap 假设的证据级别）
+
+- **目标**：消除 Gap Mining 的「伪创新」——把 gap 从「事实断言」改为「证据有界的假设」，并标注证据级别。
+- **核心原则**：**absence of evidence ≠ evidence of absence**。LLM 只能证明「检索到的论文没做」，不能证明「整个领域没人做」。
+- **改动**：
+  1. M5 v2 的 Gap Mining 输出改为 `gap_hypothesis`（不再输出全称断言）：
+     ```json
+     {
+       "claim": "尚未发现联合建模的统一框架（假设，非事实）",
+       "evidence_level": "weak | moderate | strong",
+       "basis": "基于检索到的 8 篇相关论文，其中 3 篇涉及联合建模，但均未提出统一框架",
+       "scope": "检索范围：arXiv + Semantic Scholar，query X，共 N 篇"
+     }
+     ```
+  2. `evidence_level` 由检索样本量、系统性、相关性、有无反例共同决定。
+  3. 下游 M11（Gap 维度）+ M12（文献对拍）消费 `evidence_level`：weak 时 novelty / 证据强度打折。
+- **验收**：gap 输出均为「假设」形式（"基于 N 篇论文未发现…"），无全称断言（如"领域无人做"）；evidence_level 正确反映证据量。
+
 ---
 
 ## 5. 全部完成后的集成收尾（一个框或本框）
