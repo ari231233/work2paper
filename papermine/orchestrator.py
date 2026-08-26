@@ -800,9 +800,14 @@ def _render_report_md(dossier: Dossier) -> str:
         lines.append("- 大纲：")
         for o in outline:
             lines.append("  - {}".format(o))
+    # M22：路线图 7 部分（论文主线/RQ/实验矩阵/MVP/成功标准/风险分支/阶段出口）由 plan 渲染；
+    # 旧格式 roadmap（无 core_story）返回空，沿用旧 outline+missing_items 兜底。
+    m22_lines = plan.render_roadmap_lines(r)
+    if m22_lines:
+        lines.extend(m22_lines)
     missing = r.get("missing_items") or []
     if missing:
-        lines.append("- 缺口：")
+        lines.append("- 缺口（需人工回填）：")
         for m in missing:
             lines.append("  - {}".format(m))
     lines.append("")
