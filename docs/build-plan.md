@@ -403,7 +403,7 @@ def run(dossier: Dossier, llm: LLMProvider) -> None
 - **产出**：改造各 agent 的上下文构造 + 单测。
 - **验收**：单次 LLM 调用的输入 token 下降；耗时下降。
 
-### M18 — Evidence Level（gap 假设的证据级别）
+### M18 — Evidence Level（gap 假设的证据级别）【第二优先】
 
 - **目标**：消除 Gap Mining 的「伪创新」——把 gap 从「事实断言」改为「证据有界的假设」，并标注证据级别。
 - **核心原则**：**absence of evidence ≠ evidence of absence**。LLM 只能证明「检索到的论文没做」，不能证明「整个领域没人做」。
