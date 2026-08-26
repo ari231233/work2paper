@@ -13,10 +13,13 @@
 
 - 每篇论文新增 ``understanding``：{claim / method / conclusion / applicability / limitations}。
 - 每篇论文新增 ``evidence_card``（M19 论文级证据卡）：{title / dataset / baseline / metric /
-  main_gain / limitation / claim_strength / evidence_source}。**字段提取不到一律标 null，
-  禁止 LLM 编造**（否则 novelty 会漂）；``evidence_source`` ∈ {abstract, fulltext, table}
-  由系统按论文实际可用的证据层级确定性回填（当前检索只给摘要 → 恒为 abstract，fulltext /
-  table 需后续「全文下载 + 表格解析」另立项）。
+  main_gain / limitation / claim_strength / evidence_source}。``evidence_source`` ∈
+  {abstract, fulltext, table} 由系统按论文实际可用的证据层级确定性回填（当前检索只给摘要 →
+  恒为 abstract，fulltext / table 需后续「全文下载 + 表格解析」另立项）。
+  **M19 v2（正向约束防过度保守）**：提取指令从「默认 null」改为「默认提取、提取不到才 null」——
+  摘要中**明确出现**的数据集 / 指标 / baseline / gain 必须提取，只有摘要里**完全没有**相关
+  信息的字段才标 null；并新增 ``_positive_backfill``，用保守词典把 LLM 误判成 null 的
+  dataset / metric 确定性回填（绝不编造摘要里没有的值），兜住「过度保守」的尾部风险。
 - 每条 literature 新增 ``contradiction_graph``：{nodes / edges / gaps}，其中 gaps 的
   ``type`` ∈ {contradiction, gap}，矛盾（contradiction）同时给出节点间 contradiction 边。
 - 每条 literature 新增 ``hypotheses``：每条 gap 对应一条可证伪假设（if-then + falsification）。
@@ -67,6 +70,7 @@ __all__ = [
     "_hypothesize_deterministic",
     "_evidence_source_for",
     "_evidence_card_deterministic",
+    "_positive_backfill",
     "_sanitize_evidence_card",
     "_extract_evidence_cards_with_llm",
     "_extract_evidence_entry",
@@ -85,7 +89,8 @@ MAX_GAPS = 8
 EVIDENCE_SOURCES: Tuple[str, ...] = ("abstract", "fulltext", "table")
 # 证据卡 claim_strength 的取值：strong=绝对化/全称断言，moderate=有对比的改进主张，weak=探索性/受限主张
 _CLAIM_STRENGTHS: Tuple[str, ...] = ("strong", "moderate", "weak")
-# 证据卡中由 LLM 从摘要提取的可空字段（缺失一律 null，绝不编造）；title / evidence_source 由系统确定性回填
+# 证据卡中由 LLM 从摘要提取的可空字段（摘要真没有才 null，绝不编造）；title / evidence_source
+# 由系统确定性回填；dataset / metric 在 LLM 误判为 null 时由 _positive_backfill 用词典兜底回填。
 _EVIDENCE_FIELDS: Tuple[str, ...] = (
     "dataset", "baseline", "metric", "main_gain", "limitation", "claim_strength",
 )
@@ -300,18 +305,22 @@ _UNDERSTAND_SYSTEM = (
 _EVIDENCE_SYSTEM = (
     "你是 papermine 的「论文级证据卡提取器」。给定检索命中的论文（仅标题/摘要），"
     "为每篇论文提取一张证据卡，作为 novelty 判断的证据基础。\n"
-    "字段说明（除 title / evidence_source 外均可空）：\n"
-    "1. dataset：论文实验使用的数据集/基准名（如 C-MAPSS、ImageNet）；摘要未明确提及 → null；\n"
-    "2. baseline：论文对比的基线方法（如 LSTM、SVM）；摘要未明确提及 → null；\n"
-    "3. metric：论文使用的评测指标（如 RMSE、accuracy、F1）；摘要未明确提及 → null；\n"
-    "4. main_gain：论文声称的主要提升/收益（如「精度相对基线提升 5%」）；摘要未明确给出 → null；\n"
-    "5. limitation：论文自述或可见的局限/边界；摘要未提及 → null；\n"
+    "字段说明（title 与 evidence_source 由系统据实回填，你只需填其余 6 字段）：\n"
+    "1. dataset：论文实验使用的数据集/基准名（如 C-MAPSS、SWaT、WADI、ImageNet）；\n"
+    "2. baseline：论文对比的基线方法（如 LSTM、SVM、MLP）；\n"
+    "3. metric：论文使用的评测指标（如 RMSE、accuracy、F1、precision、recall）；\n"
+    "4. main_gain：论文声称的主要提升/收益（如「精度相对基线提升 5%」「outperform … by …」）；\n"
+    "5. limitation：论文自述或可见的局限/边界；\n"
     "6. claim_strength：论文主张强度，只能取 strong（绝对化/全称断言，如「首次」「最优」「state-of-the-art」）、"
-    "moderate（有对比的改进主张）、weak（探索性/受限主张）；无法判断 → null；\n"
+    "moderate（有对比的改进主张）、weak（探索性/受限主张）；无法判断才 null；\n"
     "7. evidence_source：一律填 abstract（当前检索仅提供摘要；系统会据实回填，本字段仅供占位）。\n"
-    "铁律：只提取给定文本中【明确出现】的信息；任何未明确出现的字段一律填 null，"
-    "绝不根据常识或领域背景补全、绝不编造 baseline / gain。title 必须逐字等于给定论文标题。"
-    "只输出 JSON，严格满足给定 schema。"
+    "提取规则（正向优先，务必遵守）：\n"
+    "1. 摘要中【明确出现】的数据集名 / 指标名 / baseline / gain / 局限，必须提取、逐字填入对应字段；\n"
+    "2. 默认提取：不要因为「怕编造」就把摘要里明确写着的值留成 null——只有摘要中【完全没有】"
+    "某个字段对应信息的字段才填 null；\n"
+    "3. 值必须逐字来自给定文本（可规整大小写，如 lstm → LSTM、f1 → F1），不得改写为别的名称；\n"
+    "4. 绝不根据常识或领域背景补全、绝不编造摘要中未出现的 baseline / gain。\n"
+    "title 必须逐字等于给定论文标题。只输出 JSON，严格满足给定 schema。"
 )
 
 _MINING_SYSTEM = (
@@ -363,12 +372,15 @@ _METHOD_KEYWORDS: Tuple[Tuple[str, str], ...] = (
     ("time series", "时序建模"),
 )
 
-# 证据卡确定性降级用的保守词典（词首边界匹配，宁可漏提不可误提）：
+# 证据卡确定性降级 / 正向回填共用的保守词典（词首边界匹配，宁可漏提不可误提）：
 # 仅收录可无歧义识别的数据集名 / 评测指标；baseline / main_gain / limitation / claim_strength
 # 不在此列（无 LLM 时无法可靠提取，一律 null，绝不编造）。
+# M19 v2：加入工业时序 / 异常检测常用数据集 SWaT、WADI、CMAPSS（去连字符变体），
+# 使「摘要明确提到 SWaT/WADI」的正向对照在 LLM 误判 null 时也能被确定性回填。
 _DATASET_TERMS: Tuple[str, ...] = (
-    "C-MAPSS", "Turbofan", "PHM", "MNIST", "Fashion-MNIST",
+    "C-MAPSS", "CMAPSS", "Turbofan", "PHM", "MNIST", "Fashion-MNIST",
     "CIFAR-10", "CIFAR-100", "ImageNet", "COCO", "SQuAD", "LibriSpeech",
+    "SWaT", "WADI",
 )
 _METRIC_TERMS: Tuple[str, ...] = (
     "RMSE", "MAE", "MAPE", "MSE", "accuracy", "F1", "AUC", "AUROC",
@@ -482,7 +494,8 @@ def _understand_entry(entry: Dict[str, Any], papers: List[Dict[str, Any]],
 
 
 # ---------------------------------------------------------------------------
-# ①½ 论文级证据卡（M19）：LLM 提取 + 确定性降级，字段缺失一律 null，绝不编造
+# ①½ 论文级证据卡（M19 / M19 v2）：LLM 正向提取 + 确定性降级；摘要明确提到必须提取、
+# 提取不到才 null（绝不编造），dataset/metric 在 LLM 误判 null 时由词典确定性回填。
 # ---------------------------------------------------------------------------
 
 def _nullable(s: Any) -> Optional[str]:
@@ -541,24 +554,45 @@ def _evidence_card_deterministic(paper: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _positive_backfill(card: Dict[str, Any], paper: Dict[str, Any]) -> Dict[str, Any]:
+    """M19 v2 正向对照兜底：LLM 把摘要中明确出现的 dataset/metric 误判为 null 时，用保守词典回填。
+
+    - 只在字段为 null 时回填，绝不覆盖 LLM 已提取的正确值；
+    - dataset / metric 用无歧义词典做词首边界匹配（宁可漏提不可误提），故回填安全——绝不可能
+      编造摘要里没有的值；
+    - baseline / main_gain / limitation / claim_strength 无法用词面规则可靠回填，保持 null
+      （由提示词正向约束 LLM 提取，见 ``_EVIDENCE_SYSTEM``）。
+    """
+    title = _paper_title(paper)
+    text = (title + " " + _clean(paper.get("abstract"))).lower()
+    if card.get("dataset") is None:
+        card["dataset"] = _join_or_none(_match_terms(text, _DATASET_TERMS))
+    if card.get("metric") is None:
+        card["metric"] = _join_or_none(_match_terms(text, _METRIC_TERMS))
+    return card
+
+
 def _sanitize_evidence_card(raw: Any, title: str, paper: Dict[str, Any]) -> Dict[str, Any]:
     """把 LLM 原始证据卡规范化为最终 8 字段卡；任何非法输入退化为确定性降级。
 
     - ``title`` 恒取论文真实标题（杜绝标题编造）；
     - ``evidence_source`` 恒由 ``_evidence_source_for`` 确定性回填（杜绝来源虚标）；
-    - 6 个可空字段：非字符串 / 空串 → null；claim_strength 非法枚举 → null。
+    - 6 个可空字段：非字符串 / 空串 → null；claim_strength 非法枚举 → null；
+    - M19 v2：最终卡片统一过一遍 ``_positive_backfill``，把 LLM 误判成 null 的 dataset / metric
+      用保守词典回填（只填 null、绝不编造）。
     """
     if not isinstance(raw, dict):
-        return _evidence_card_deterministic(paper)
-    card: Dict[str, Any] = {"title": title}
-    for field in _EVIDENCE_FIELDS:
-        val = raw.get(field)
-        if field == "claim_strength":
-            card[field] = val if val in _CLAIM_STRENGTHS else None
-        else:
-            card[field] = _nullable(val)
-    card["evidence_source"] = _evidence_source_for(paper)
-    return card
+        card = _evidence_card_deterministic(paper)
+    else:
+        card = {"title": title}
+        for field in _EVIDENCE_FIELDS:
+            val = raw.get(field)
+            if field == "claim_strength":
+                card[field] = val if val in _CLAIM_STRENGTHS else None
+            else:
+                card[field] = _nullable(val)
+        card["evidence_source"] = _evidence_source_for(paper)
+    return _positive_backfill(card, paper)
 
 
 def _extract_evidence_cards_with_llm(entry: Dict[str, Any], papers: List[Dict[str, Any]],
@@ -1035,7 +1069,8 @@ def analyze_literature(literature: List[dict], llm: LLMProvider) -> List[dict]:
     """对每条 literature 条目依次执行 理解 → 证据卡(M19) → 矛盾/gap 挖掘 → 假设生成，原地丰富并返回。
 
     - 每篇论文写 ``understanding``；
-    - 每篇论文写 ``evidence_card``（M19 论文级证据卡，8 字段；提取不到一律 null，绝不编造，
+    - 每篇论文写 ``evidence_card``（M19 论文级证据卡，8 字段；M19 v2：摘要明确提到必须提取、
+      提取不到才 null，绝不编造；dataset/metric 在 LLM 误判 null 时由词典确定性回填，
       ``evidence_source`` 确定性回填）；
     - 每条目写 ``contradiction_graph``（nodes/edges/gaps，gaps 的 type ∈ {gap, contradiction}；
       gap 型附 ``gap_hypothesis``＝{claim/evidence_level/basis/scope}，矛盾型 ``evidence_level``=strong）；

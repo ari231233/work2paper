@@ -19,8 +19,10 @@ from papermine.literature import (
     GAP_HYPOTHESIS_SCHEMA,
     HYPOTHESIS_SCHEMA,
     MINING_SCHEMA,
+    _EVIDENCE_SYSTEM,
     _compute_evidence_level,
     _evidence_source_for,
+    _positive_backfill,
     _soften_universal,
     analyze_literature,
 )
@@ -320,6 +322,66 @@ class PaperEvidenceCardTest(unittest.TestCase):
         self.assertEqual(card["evidence_source"], "abstract")
         self.assertIsNone(card["baseline"])             # 幻觉标题的卡片被丢弃 → 确定性降级
         self.assertIsNone(card["main_gain"])
+
+    def test_prompt_positive_constraint_default_extract(self):
+        """M19 v2：抽取指令必须「正向优先、默认提取」，不能再用「未明确提及 → null」的过度保守措辞。"""
+        system = _EVIDENCE_SYSTEM
+        self.assertIn("必须提取", system)     # 正向约束：明确出现的必须提取
+        self.assertIn("默认提取", system)     # 「默认提取、提取不到才 null」的翻转
+        self.assertIn("完全没有", system)     # 只有摘要里完全没有相关信息才 null
+        self.assertNotIn("铁律", system)      # 旧的「默认 null」铁律措辞已移除
+        self.assertNotIn("未明确提及 → null", system)
+
+    def test_llm_over_null_dataset_metric_backfilled(self):
+        """M19 v2 正向对照：摘要明确提到 SWaT/F1，LLM 却误判成 null → 词典确定性回填为非空。"""
+        abstract = "We evaluate on the SWaT dataset and report F1 and accuracy."
+        lit = [_entry([_paper("SWaT Anomaly Detection", abstract=abstract)])]
+
+        def handler(system, user, schema, temperature=0.2):
+            if schema is BATCH_EVIDENCE_CARD_SCHEMA:
+                return {"papers": [{
+                    "title": "SWaT Anomaly Detection",
+                    "evidence_card": {
+                        "title": "SWaT Anomaly Detection",
+                        "dataset": None,        # 过度保守：摘要明明写了 SWaT
+                        "baseline": None,
+                        "metric": None,         # 过度保守：摘要明明写了 F1/accuracy
+                        "main_gain": None,
+                        "limitation": None,
+                        "claim_strength": None,
+                        "evidence_source": "abstract",
+                    },
+                }]}
+            return {}
+        analyze_literature(lit, _StubLLM(handler=handler))
+        card = lit[0]["papers"][0]["evidence_card"]
+        self.assertIn("SWaT", card["dataset"])       # 正向对照：数据集字段非空
+        self.assertIn("F1", card["metric"])          # 正向对照：指标字段非空
+        self.assertIn("accuracy", card["metric"])
+        self.assertIsNone(card["baseline"])          # 摘要真没提 baseline → 仍 null
+        self.assertIsNone(card["main_gain"])         # 摘要真没提 gain → 仍 null
+
+    def test_positive_backfill_never_overwrites_llm_value(self):
+        """M19 v2：正向回填只在字段为 null 时生效，绝不覆盖 LLM 已提取的正确值。"""
+        card = {"dataset": "ImageNet", "metric": None, "baseline": None}
+        paper = _paper("T", abstract="SWaT dataset, F1 score.")
+        out = _positive_backfill(dict(card), paper)
+        self.assertEqual(out["dataset"], "ImageNet")   # LLM 已填 → 不覆盖
+        self.assertIn("F1", out["metric"])             # LLM 漏填 → 回填
+        self.assertIsNone(out["baseline"])             # 不参与回填
+
+    def test_offline_extracts_swat_wadi(self):
+        """M19 v2 正向对照（离线路径）：摘要明确提到 SWaT/WADI/accuracy/F1 时对应字段非空。"""
+        abstract = "We test on SWaT and WADI and report accuracy, F1, precision and recall."
+        lit = [_entry([_paper("Water Testbed Anomaly Detection", abstract=abstract)])]
+        analyze_literature(lit, NullProvider())
+        card = lit[0]["papers"][0]["evidence_card"]
+        self.assertIn("SWaT", card["dataset"])
+        self.assertIn("WADI", card["dataset"])
+        self.assertIn("accuracy", card["metric"])
+        self.assertIn("F1", card["metric"])
+        self.assertIn("precision", card["metric"])
+        self.assertIn("recall", card["metric"])
 
     def test_evidence_card_schema_contract(self):
         self.assertEqual(EVIDENCE_CARD_SCHEMA["type"], "object")
