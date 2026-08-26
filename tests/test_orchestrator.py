@@ -11,7 +11,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from papermine import experience, orchestrator, policy, storage
+from papermine import experience, orchestrator, policy, reporting, storage
 from papermine.dossier import Dossier
 from papermine.llm import NullProvider
 
@@ -263,7 +263,7 @@ class PolicyInjectionIntegrationTest(unittest.TestCase):
 
 
 class RenderReportLiteratureTest(unittest.TestCase):
-    """M9：报告渲染补文献段（dossier.literature → report.md「文献检索结果」段）。"""
+    """M23：报告「A. Literature Evidence」附录（完整文献检索 + 证据卡）+ Decision §3 概览。"""
 
     def _dossier(self) -> Dossier:
         d = Dossier()
@@ -273,8 +273,11 @@ class RenderReportLiteratureTest(unittest.TestCase):
 
     def test_render_literature_offline(self):
         md = orchestrator._render_report_md(self._dossier())
-        self.assertIn("## 文献检索结果", md)
+        self.assertIn("## A. Literature Evidence", md)
         self.assertIn("（离线/无结果）", md)
+        # Decision Report §3 也标注离线
+        self.assertIn("## 3. Literature Landscape", md)
+        self.assertIn("关键论文：（离线/无结果）", md)
 
     def test_render_literature_with_results(self):
         d = self._dossier()
@@ -290,12 +293,14 @@ class RenderReportLiteratureTest(unittest.TestCase):
             "sources": ["arxiv", "semantic_scholar"],
         }]
         md = orchestrator._render_report_md(d)
-        self.assertIn("## 文献检索结果", md)
+        self.assertIn("## A. Literature Evidence", md)
         self.assertIn("稀疏表示 推荐系统", md)
         self.assertIn("Deep Sparse Representation（NeurIPS，2020）", md)
         self.assertIn("Learning to Hash（arXiv）", md)
         self.assertIn("gap_note：现有工作未覆盖跨模态稀疏表示。", md)
         self.assertIn("来源：arxiv、semantic_scholar", md)
+        # Decision Report §3 给出证据覆盖度
+        self.assertIn("证据覆盖度：共 2 篇论文", md)
 
     def test_render_literature_query_no_papers_marks_offline(self):
         d = self._dossier()
@@ -306,13 +311,13 @@ class RenderReportLiteratureTest(unittest.TestCase):
             "sources": [],
         }]
         md = orchestrator._render_report_md(d)
-        self.assertIn("## 文献检索结果", md)
+        self.assertIn("## A. Literature Evidence", md)
         self.assertIn("某查询", md)
         self.assertIn("离线/无结果", md)
 
 
 class RenderReportNoveltyDimensionsTest(unittest.TestCase):
-    """M11：报告渲染展示分维度 novelty 明细（配合 M9 文献段）。"""
+    """M23：报告「D. Full Novelty Evaluation」附录展示分维度 novelty 明细。"""
 
     def _dossier(self) -> Dossier:
         d = Dossier()
@@ -341,9 +346,9 @@ class RenderReportNoveltyDimensionsTest(unittest.TestCase):
             "evidence": [],
         }]
         md = orchestrator._render_report_md(d)
-        self.assertIn("## 可行性评估", md)
+        self.assertIn("## D. Full Novelty Evaluation", md)
         self.assertIn("分维度明细", md)
-        self.assertIn("novelty=63.0（Revise）", md)
+        self.assertIn("novelty（总分）=63.0（Revise）", md)
         for label in ("问题新颖性", "方法新颖性", "技术突破性",
                       "与已有工作的差异程度", "可推广价值"):
             self.assertIn(label, md)
@@ -363,8 +368,8 @@ class RenderReportNoveltyDimensionsTest(unittest.TestCase):
             "evidence": [],
         }]
         md = orchestrator._render_report_md(d)
-        self.assertIn("## 可行性评估", md)
-        self.assertIn("novelty=3.5", md)
+        self.assertIn("## D. Full Novelty Evaluation", md)
+        self.assertIn("novelty（总分）=3.5", md)
         self.assertNotIn("分维度明细", md)
 
 
@@ -412,7 +417,7 @@ class RenderReportCalibrationTest(unittest.TestCase):
             "evidence": [],
         }]
         md = orchestrator._render_report_md(d)
-        self.assertIn("## 可行性评估", md)
+        self.assertIn("## D. Full Novelty Evaluation", md)
         self.assertIn("评分校准", md)
         self.assertIn("问题 → 答案 → 规则 → 得分", md)
         self.assertIn("方法新颖性（权重35）", md)
@@ -501,7 +506,7 @@ class RenderReportM9V2Test(unittest.TestCase):
         d = self._dossier()
         d.literature = self._literature()
         md = orchestrator._render_report_md(d)
-        self.assertIn("## 文献检索结果", md)
+        self.assertIn("## A. Literature Evidence", md)
         for label in ("核心主张", "方法", "结论", "适用条件", "局限"):
             self.assertIn(label, md)
         self.assertIn("LSTM 可预测剩余寿命", md)
@@ -511,7 +516,7 @@ class RenderReportM9V2Test(unittest.TestCase):
         d = self._dossier()
         d.literature = self._literature()
         md = orchestrator._render_report_md(d)
-        self.assertIn("## 矛盾 / 缺口", md)
+        self.assertIn("## B. Gap Mining", md)
         self.assertIn("缺口 g1：数据漂移下的剩余寿命预测", md)
         self.assertIn("矛盾 g2：异常检测是否需要标注", md)
         self.assertIn("冲突双方：LSTM RUL Prediction ⇄ Isolation Forest Anomaly Detection", md)
@@ -531,7 +536,7 @@ class RenderReportM9V2Test(unittest.TestCase):
             "status": "pending_eval",
         }]
         md = orchestrator._render_report_md(d)
-        self.assertIn("## 假设", md)
+        self.assertIn("## C. Hypotheses", md)
         self.assertIn("h1：若引入漂移自适应机制，则剩余寿命预测精度提升", md)
         self.assertIn("可证伪条件：精度无显著提升则证伪", md)
         self.assertIn("催生的 idea：i1", md)
@@ -549,9 +554,167 @@ class RenderReportM9V2Test(unittest.TestCase):
             "sources": ["arxiv"],
         }]
         md = orchestrator._render_report_md(d)
-        self.assertIn("## 矛盾 / 缺口", md)
-        self.assertIn("## 假设", md)
+        self.assertIn("## B. Gap Mining", md)
+        self.assertIn("## C. Hypotheses", md)
         self.assertNotIn("核心主张", md)
+
+
+class RenderReportM23TwoLayerTest(unittest.TestCase):
+    """M23：两层报告——Decision Report（默认精简）+ Evidence Appendix（完整证据，后置）。"""
+
+    def _dossier(self) -> Dossier:
+        d = Dossier()
+        d.meta["run_id"] = "run_test"
+        d.meta["llm_backend"] = "null"
+        return d
+
+    @staticmethod
+    def _contribution(ctype: str) -> dict:
+        label = {"A": "新模块创新（Method Innovation）",
+                 "B": "框架集成创新（Framework Integration）"}[ctype]
+        return {
+            "type": ctype,
+            "type_label": label,
+            "reason": "确定性测试桩：{}".format(label),
+            "matrix": {
+                "method": {"strength": "low", "label": "低", "reason": "无新模块"},
+                "framework": {"strength": "medium_high", "label": "中高", "reason": "任务交互"},
+                "application": {"strength": "medium", "label": "中", "reason": "面向场景"},
+                "problem": {"strength": "high", "label": "高", "reason": "重新定义联合任务"},
+                "training": {"strength": "none", "label": "无", "reason": "无"},
+                "engineering": {"strength": "high", "label": "高", "reason": "易落地"},
+            },
+            "attacks": {
+                "ablation": {"attack": "删除异常检测后剩什么", "answer": "退化为普通 RUL 预测"},
+                "concatenation": {"attack": "A+B concat 是否等效", "answer": "不等效，交互有效"},
+                "reviewer": {"attack": "merely a combination", "answer": "共享表示 + 联合优化反驳"},
+            },
+            "degraded": False,
+        }
+
+    def _rich_dossier(self) -> Dossier:
+        d = self._dossier()
+        d.assets["narrative"] = "工业设备剩余寿命预测与异常检测的横向项目。"
+        d.problems = [{"problem_id": "p1", "title": "数据漂移下的 RUL",
+                       "formulation": "如何在数据漂移下预测剩余寿命？"}]
+        d.literature = [{
+            "query": "剩余寿命预测",
+            "papers": [{
+                "title": "LSTM RUL Prediction", "venue": "IEEE TII", "year": 2021, "source": "arxiv",
+                "understanding": {"claim": "LSTM 可预测剩余寿命", "method": "LSTM", "conclusion": "优于基线",
+                                  "applicability": "小样本时序", "limitations": "长序列退化"},
+                "evidence_card": {"title": "LSTM RUL Prediction", "dataset": "C-MAPSS",
+                                  "baseline": "SVR", "metric": "RMSE", "main_gain": "提升 3%",
+                                  "limitation": None, "claim_strength": "moderate",
+                                  "evidence_source": "abstract"},
+            }],
+            "gap_note": "现有工作未覆盖数据漂移场景。",
+            "sources": ["arxiv", "semantic_scholar"],
+            "contradiction_graph": {"nodes": [], "edges": [], "gaps": [{
+                "gap_id": "g1", "type": "gap", "claim_point": "数据漂移下的剩余寿命预测",
+                "description": "检索论文均假设静态分布", "angle": "数据漂移", "paper_refs": [],
+                "gap_hypothesis": {"claim": "尚未发现数据漂移下的剩余寿命预测（假设，非事实）",
+                                   "evidence_level": "weak", "basis": "基于 1 篇论文",
+                                   "scope": "检索范围：arXiv，共 1 篇"}}]},
+            "hypotheses": [{"hypothesis_id": "h1", "gap_ref": "g1",
+                            "statement": "若引入漂移自适应机制，则预测精度提升",
+                            "falsification": "精度无提升则证伪"}],
+        }]
+        d.ideas = [
+            {"idea_id": "i1", "claim": "漂移自适应剩余寿命预测方法",
+             "novelty_hypothesis": "现有工作未覆盖数据漂移", "problem_ref": "p1",
+             "literature_refs": ["LSTM RUL Prediction"], "gap_refs": ["g1"],
+             "hypothesis_refs": ["h1"], "evidence": [], "status": "pending_eval"},
+            {"idea_id": "i2", "claim": "异常检测辅助 RUL 的框架集成",
+             "novelty_hypothesis": "两任务协同产生交互", "problem_ref": "p1",
+             "literature_refs": [], "gap_refs": [], "hypothesis_refs": [],
+             "evidence": [], "status": "pending_eval"},
+        ]
+        d.evaluations = [
+            {"idea_ref": "i1", "contribution": self._contribution("A"),
+             "novelty_score": 78.0, "novelty_band": "Accept",
+             "novelty_dimensions": {"problem_novelty": {"score": 4, "reason": "r"},
+                                    "method_novelty": {"score": 4, "reason": "r"},
+                                    "technical_depth": {"score": 3, "reason": "r"},
+                                    "gap": {"score": 4, "reason": "r"},
+                                    "generalization": {"score": 3, "reason": "r"}},
+             "calibration": {},
+             "evidence_validation": {"evidence": "medium", "reason": "有文献对拍",
+                                     "checks": {}, "degraded": False},
+             "data_feasibility": "high", "workload_hours": 80, "venue_guess": "CCF-B",
+             "verdict": "proceed", "rework_reason": None, "evidence": []},
+            {"idea_ref": "i2", "contribution": self._contribution("B"),
+             "novelty_score": 65.0, "novelty_band": "Revise",
+             "novelty_dimensions": {}, "calibration": {},
+             "evidence_validation": {"evidence": "weak", "reason": "claim 过强",
+                                     "checks": {}, "degraded": False},
+             "data_feasibility": "medium", "workload_hours": 100, "venue_guess": "EI 会议",
+             "verdict": "rework", "rework_reason": "需细化", "evidence": []},
+        ]
+        d.roadmap = {
+            "selected_idea": "i1",
+            "paper_type": "方法论文",
+            "outline": ["1. 引言", "2. 方法"],
+            "core_story": {"status_quo": "现状", "problem": "问题", "method": "方法", "contribution": "贡献"},
+            "research_questions": [{"id": "RQ1", "question": "核心方案是否优于 baseline",
+                                    "target_experiments": ["E1"]}],
+            "experiment_matrix": [{"experiment": "E1", "purpose": "主实验",
+                                   "independent_variable": "是否启用核心方案",
+                                   "baselines": ["LSTM"], "metrics": ["RMSE"], "rq": "RQ1"}],
+            "minimum_viable_paper": {"must_have": ["准备数据", "复现 baseline"], "optional": ["理论分析"]},
+            "success_criteria": {"success": ["显著优于"], "failure": ["无提升"], "pivot": "转失效分析"},
+            "risk_branches": [{"risk": "XGBoost 始终占优", "branch": "转失效条件分析"}],
+            "stage_exits": [{"stage": "Week 1", "tasks": ["跑通数据"], "exit_criteria": "baseline 可复现"}],
+            "missing_items": [],
+        }
+        d.human_decisions = [{"checkpoint": "cp1", "decision": "accept", "note": "ok"}]
+        return d
+
+    def test_two_layer_structure_and_order(self):
+        md = orchestrator._render_report_md(self._rich_dossier())
+        self.assertIn("# Papermine Research Report", md)
+        self.assertIn("# Evidence Appendix（完整证据）", md)
+        self.assertLess(md.index("# Papermine Research Report"), md.index("# Evidence Appendix"))
+        for sec in ("## 0. Executive Summary", "## 1. Project Understanding",
+                    "## 2. Research Questions", "## 3. Literature Landscape",
+                    "## 4. Candidate Ideas", "## 5. Recommended Idea",
+                    "## 6. Paper Roadmap", "## 7. Immediate Next Actions"):
+            self.assertIn(sec, md)
+        for sec in ("## A. Literature Evidence", "## B. Gap Mining", "## C. Hypotheses",
+                    "## D. Full Novelty Evaluation", "## E. Attack Tests", "## F. Human Decisions"):
+            self.assertIn(sec, md)
+
+    def test_decision_report_concise_and_separated(self):
+        d = self._rich_dossier()
+        decision = reporting.render_decision_report(d)
+        appendix = reporting.render_evidence_appendix(d)
+        # 决策版不含附录段
+        for sec in ("## A. Literature Evidence", "## D. Full Novelty Evaluation", "## E. Attack Tests"):
+            self.assertNotIn(sec, decision)
+        # 细节（证据卡 / 完整评分 / 攻击测试）只进附录，正文只给结论
+        self.assertNotIn("证据卡", decision)
+        self.assertIn("证据卡", appendix)
+        self.assertNotIn("分维度明细", decision)
+        self.assertIn("分维度明细", appendix)
+        self.assertIn("攻击测试", appendix)
+        # Executive Summary 给出推荐结论（M23 改动 2）
+        self.assertIn("## 0. Executive Summary", decision)
+        self.assertIn("推荐方向", decision)
+        self.assertIn("推荐程度", decision)
+        self.assertIn("为什么推荐", decision)
+        self.assertIn("当前最重要的 3 个动作", decision)
+        # 候选 idea 排名表 + 贡献矩阵进度条（M23 改动 3/4）
+        self.assertIn("| Idea | 类型 | Novelty | Evidence | Feasibility | 推荐 |", decision)
+        self.assertIn("█████", decision)
+
+    def test_gap_table_compressed_in_decision(self):
+        """M23 改动 6：Decision Report 不含 gap 完整依据，附录 B 才有表格 + 完整依据。"""
+        d = self._rich_dossier()
+        decision = reporting.render_decision_report(d)
+        appendix = reporting.render_evidence_appendix(d)
+        self.assertNotIn("| Gap | 研究空白假设 | Evidence | Coverage |", decision)
+        self.assertIn("| Gap | 研究空白假设 | Evidence | Coverage |", appendix)
+        self.assertIn("完整依据", appendix)
 
 
 if __name__ == "__main__":
