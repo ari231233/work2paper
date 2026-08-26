@@ -574,6 +574,34 @@ F. Human Decisions
 
 - **验收**：报告默认是精简的 Decision Report（长度 ≈ 当前 25~35%），完整证据在 Appendix；一个学生能 2 分钟内看完 Decision Report，并明确知道「推荐哪个、为什么、下一步做什么」。
 
+### M24 — Web Demo 后端（FastAPI REST API 围绕 Dossier）【第一优先】
+
+- **目标**：把 Python 核心暴露成 REST API，前端只经 API 访问（不直接碰 Dossier / Agent）。
+- **前置**：M1-M23 全部（核心功能已稳定）+ 完整设计见 `docs/web-demo.md`。
+- **产出**：`web/` 目录（FastAPI app）+ `api.py` 路由 + 单测。
+- **接口**（围绕 Dossier）：
+  - 查询：`GET /projects/{id}`、`/ideas`、`/literature`、`/gaps`、`/roadmap`、`/history`
+  - 操作：`POST /projects/{id}/analyze`、`POST /ideas/{id}/refine`、`POST /ideas/{id}/evaluate`、`POST /gaps/{id}/retrieve-more`
+- **要点**：
+  1. **模块化重跑**是核心：暴露单 Agent / 单环节的重跑端点（如 `retrieve-more` 只跑检索→gap→评估更新），而非只暴露全量 `analyze`。
+  2. Agent 操作端点（refine / evaluate / challenge / rescore）带当前上下文（idea / literature_refs / gap / evaluation）。
+  3. 现有 Python 核心不改接口契约，FastAPI 只是薄封装。
+- **验收**：`GET /projects/{id}` 返回 dossier 的 Decision Report 数据；`POST /ideas/{id}/refine` 能触发单 idea 细化并返回更新；pytest 通过。
+
+### M25 — Web Demo 前端（Next.js 科研决策工作台，5 页面）【第一优先】
+
+- **目标**：把 report 从「阅读器」升级为「科研决策工作台」——左导航/状态、中结论/分析、右证据/操作。
+- **前置**：M24（后端 API 契约）。
+- **产出**：`web/` 前端（Next.js + Tailwind + shadcn/ui + Recharts + React Flow）。
+- **Demo 第一版 5 页面**：
+  1. **Overview**：Research Recommendation 大卡片（推荐 idea + Thesis Fit/Evidence/Feasibility/Novelty/Risk）+ Why + Risk + Next 3 Actions + 流程进度。
+  2. **Literature & Gap**：Research Landscape（paper cards + Relevant/Partial/Peripheral 标签）+ Evidence Graph（React Flow，点 gap 展开证据）。
+  3. **Ideas**：候选池卡片（Thesis Fit / ⭐Recommended）+ 排序。
+  4. **Idea Detail**：Tab（Overview/Contribution/Evidence/Reviewer Risk/Experiments）+ 贡献雷达图 + Innovation Boundary。
+  5. **Roadmap**：Paper Story + RQ + Experiment Matrix（可展开）+ Kanban 时间线。
+- **要点**：UI 用产品语言（文献/创新点/路线图），**不用 M1-M16 内部命名**；右下角固定「Ask PaperMine」contextual 入口 + 快捷按钮。
+- **验收**：演示路径跑通（打开项目 → Overview 推荐 → Ideas 候选 → i5 详情 → Evidence → Roadmap 6 周计划）；页面数据来自 M24 的 API。
+
 ---
 
 ## 5. 全部完成后的集成收尾（一个框或本框）
