@@ -466,6 +466,43 @@ def run(dossier: Dossier, llm: LLMProvider) -> None
   4. 保留 M19 的证据卡作为答题依据（每个 yes/no 都要能引用证据）。
 - **验收**：对 sample 项目，每个维度分数都能追溯到「回答了哪些问题、规则怎么算」；相同答案 → 相同分数（可复现）。
 
+### M21 — 面向硕士的创新点理解（类型分类 + 贡献矩阵 + 攻击测试）【第一优先】
+
+- **目标**：针对硕士生（创新点要求较博士宽松），把评估从「novelty 打分 → accept/reject」改为「创新类型分类 + 贡献矩阵 + 攻击测试」，避免"模块组合 → 误 reject"。
+- **背景**：当前 `idea → novelty score → accept/reject` 会把 "Transformer + CNN" 判成低 novelty 直接 reject，但这类组合在硕士论文里可能有价值（框架集成 / 应用创新）。
+
+#### M21.1 Contribution Type Classifier（创新类型分类）
+
+先分类、不评分：
+
+- 类型 A：新模块创新（Method Innovation）
+- 类型 B：已有方法的新组合（Framework Integration）
+- 类型 C：已有方法迁移到新场景（Application Innovation）
+- 类型 D：问题重新建模（Problem Formulation）
+- 类型 E：训练策略创新（Training Strategy Innovation）
+
+#### M21.2 Contribution Matrix（创新贡献矩阵）
+
+不输出 "novelty=71.5"，输出矩阵：
+
+| 贡献类型 | 强度 | 原因 |
+|---|---|---|
+| 方法创新 | 低 | 没有新模块 |
+| 框架创新 | 中高 | 两个任务产生交互 |
+| 问题创新 | 高 | 重新定义联合任务 |
+| 工程价值 | 高 | 容易落地 |
+
+#### M21.3 Attack Test（已有工作攻击测试）
+
+对每个 idea，Agent 自动生成攻击并提前回答：
+
+- **Attack 1（消融）**：删除核心模块，剩下什么？（如：异常检测辅助 RUL → 删异常检测 → 普通 RUL 预测，说明异常检测是贡献）
+- **Attack 2（简单拼接）**：A→B 换成 A+B concat 是否等效？等效 → 机制创新弱；dynamic weighting 有效 → 贡献成立
+- **Attack 3（reviewer 视角）**：reviewer 会说 "merely a combination"？提前准备反驳（如：共享 representation、anomaly score 参与 optimization、消融证明 interaction 有效）
+
+- **与 M11/M12/M20 的关系**：本卡是评估的「前置重构」——分类 / 矩阵 / 攻击测试**先于** novelty 评分；novelty 评分（M11/M20）降级为「其中一维参考」，不再作为「直接 reject 依据」；verdict 按「贡献类型」差异化，而非一刀切 novelty 分数。
+- **验收**：对 sample 项目，每个 idea 先输出「类型 + 贡献矩阵 + 攻击测试」，而非直接 novelty 分；模块组合类 idea 不再被直接 reject。
+
 ---
 
 ## 5. 全部完成后的集成收尾（一个框或本框）
