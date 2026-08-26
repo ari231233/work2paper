@@ -8,7 +8,9 @@
 输入字段：
 - `idea`：候选创新点——`claim`（一句话主张）、`novelty_hypothesis`（新颖性假设）、
   `problem_ref`、`literature_refs`（引用的文献）、`hypothesis_refs` / `gap_refs`（M5 v2 追溯）。
-- `literature`：检索到的文献摘要（标题 / 摘要 / venue / 结构化理解 / gap_note），是「文献对拍」的依据。
+- `literature`：检索到的文献摘要（标题 / 摘要 / venue / 结构化理解 / gap_note /
+  `gap_evidence_levels`），是「文献对拍」的依据；`gap_evidence_levels` 是 gap 假设的证据级别
+  （weak / moderate / strong），weak 说明「差异主张」本身证据弱，对拍结论应保守。
 - `facts`：项目事实中的 data / metrics / methods / scenarios（用于判断「claim 能否被验证」）。
 
 输出一个 JSON 对象，字段如下：
@@ -28,4 +30,6 @@
 3. 文献缺失（`literature` 为空 / `literature_refs` 为空）时，`similar_work` 给 `missing`
    并说明「无法对拍」，整体 evidence 不应给 `strong`；
 4. claim 含「首创 / 首个 / 完全解决 / 超越所有 / 大幅提升且无基准」等过强表述时，
-   `claim_strength` 给 `concern` 或 `missing`，并建议弱化为可检验的限定主张。
+   `claim_strength` 给 `concern` 或 `missing`，并建议弱化为可检验的限定主张；
+5. `gap_evidence_levels` 整体为 `weak` 时（gap 假设证据不足），`similar_work` 不应给 `ok`
+   （文献对拍结论打折），并说明「gap 证据弱，差异主张需补检索」。

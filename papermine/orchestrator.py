@@ -521,6 +521,19 @@ _UNDERSTANDING_FIELDS = (
 # contradiction_graph.gaps[].type → 中文标签（与 literature.py 对齐）
 _GAP_TYPE_LABELS = {"gap": "缺口", "contradiction": "矛盾"}
 
+# M18：gap 假设证据级别 → 中文标签（weak/moderate/strong，与 literature.py 对齐）
+_EVIDENCE_LEVEL_LABELS = {"weak": "弱", "moderate": "中", "strong": "强"}
+
+
+def _gap_evidence_level_label(g: Dict[str, Any]) -> str:
+    """读取一条 gap/矛盾记录的 evidence_level 中文标签（gap 型在 gap_hypothesis 内，矛盾型在顶层）。"""
+    if not isinstance(g, dict):
+        return ""
+    gh = g.get("gap_hypothesis")
+    lv = (gh.get("evidence_level") if isinstance(gh, dict) else None) or g.get("evidence_level")
+    lv = _md_text(lv)
+    return _EVIDENCE_LEVEL_LABELS.get(lv, lv)
+
 
 def _render_understanding_lines(paper: Dict[str, Any]) -> List[str]:
     """把单篇论文的结构化理解渲染成嵌套子行；无 understanding 时返回空列表（M9 v2）。"""
@@ -632,10 +645,28 @@ def _render_report_md(dossier: Dossier) -> str:
                     refs = [t for t in (g.get("paper_refs") or []) if _md_text(t)]
                     if refs:
                         lines.append("    - 冲突双方：{}".format(" ⇄ ".join(refs)))
+                    lv = _gap_evidence_level_label(g)
+                    if lv:
+                        lines.append("    - 证据级别：{}".format(lv))
                 else:
                     angle = _md_text(g.get("angle"))
                     if angle and angle != point:
                         lines.append("    - 缺口角度：{}".format(angle))
+                    # M18：gap 是「证据有界的假设」——渲染假设 claim + 证据级别 + 依据 + 检索范围
+                    gh = g.get("gap_hypothesis") if isinstance(g, dict) else None
+                    if isinstance(gh, dict):
+                        claim = _md_text(gh.get("claim"))
+                        if claim:
+                            lines.append("    - 假设：{}".format(claim))
+                        lv = _gap_evidence_level_label(g)
+                        if lv:
+                            lines.append("    - 证据级别：{}".format(lv))
+                        basis = _md_text(gh.get("basis"))
+                        if basis:
+                            lines.append("    - 依据：{}".format(basis))
+                        scope = _md_text(gh.get("scope"))
+                        if scope:
+                            lines.append("    - {}".format(scope))
             _contradiction_rendered = True
     if not _contradiction_rendered:
         lines.append("（无）")

@@ -38,6 +38,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from ..dossier import Dossier
+from ..literature import _literature_gap_evidence_levels
 from ..llm import LLMError, LLMProvider, SchemaError
 from ..parallel import map_parallel
 from .evidence import CHECK_DIMENSIONS, validate_evidence, validate_evidence_batch
@@ -245,6 +246,37 @@ def _format_venue_distribution(dist: Dict[str, int]) -> str:
     return "，".join("{}×{}".format(v, k) for k, v in items)
 
 
+# ---------------------------------------------------------------------------
+# M18：gap 假设证据级别（Gap 维度消费；weak 时 novelty 打折）
+# ---------------------------------------------------------------------------
+
+def _gap_evidence_levels(literature: List[dict]) -> List[str]:
+    """收集全部 gap/矛盾的 evidence_level（M18，供 Gap 维度与证据链消费）。"""
+    return _literature_gap_evidence_levels(literature)
+
+
+def _gap_evidence_weak(levels: List[str]) -> Optional[bool]:
+    """gap 假设证据是否「整体偏弱」：有 gap 假设且全为 weak → True；无 gap 假设 → None（不打折）。"""
+    if not levels:
+        return None
+    return all(lv == "weak" for lv in levels)
+
+
+def _gap_evidence_summary(levels: List[str]) -> str:
+    """把 evidence_level 列表聚合成单档（无 → unknown；有 strong → strong；全 weak → weak；否则 moderate）。"""
+    if not levels:
+        return "unknown"
+    if any(lv == "strong" for lv in levels):
+        return "strong"
+    if all(lv == "weak" for lv in levels):
+        return "weak"
+    return "moderate"
+
+
+# gap 假设证据级别为 weak 时，Gap 维度分的折扣系数（docs/build-plan.md §4 M18：weak 打折）
+_GAP_WEAK_DISCOUNT = 0.6
+
+
 def _tier_of(venue: str) -> str:
     """把单个 venue 名称映射到档位（静态档位库 + 兜底）。"""
     v = (venue or "").strip().lower()
@@ -284,6 +316,9 @@ def _deterministic_dimensions(idea: dict, gap_notes: List[str],
     - 方法组合度 + 新机制关键词 → 方法新颖性；
     - 重方法 / 方法复杂度 → 技术突破性；
     - 通用 / 可复用主张 → 可推广价值。
+
+    （M18 的 Gap 维度弱证据打折在 ``_apply_gap_evidence_discount`` 统一后置执行，
+    对 LLM 与确定性两条路径一致生效。）
     """
     methods = facts.get("methods") or []
     claim = " ".join(str(idea.get(k) or "") for k in ("claim", "novelty_hypothesis"))
@@ -496,12 +531,36 @@ def _coerce_number(value: Any, default: Optional[float],
     return default
 
 
+def _apply_gap_evidence_discount(dims: Dict[str, Any],
+                                 gap_evidence_levels: Optional[List[str]]) -> Dict[str, Any]:
+    """M18：gap 假设证据级别整体 weak 时，对「Gap 维度」分硬打折（0.6×）并标注理由。
+
+    证据弱 → 「与 SOTA 的差异主张」也应弱。打折确定性执行（可复现、数字可追溯），
+    对 LLM 与确定性两条评分路径**一致生效**，不依赖 LLM 自觉保守。
+    """
+    if _gap_evidence_weak(gap_evidence_levels or []) is not True:
+        return dims
+    out = dict(dims)
+    item = out.get("gap")
+    if isinstance(item, dict):
+        score = _coerce_number(item.get("score"), None, 0.0, 5.0)
+        if score is not None:
+            reason = str(item.get("reason") or "").strip()
+            note = "；gap 假设证据级别=weak（样本/系统性/相关性不足）→ 差异度打折 0.6×"
+            out["gap"] = {
+                "score": round(score * _GAP_WEAK_DISCOUNT, 1),
+                "reason": reason + note if reason else note.lstrip("；"),
+            }
+    return out
+
+
 # ---------------------------------------------------------------------------
 # LLM 调用与证据装配
 # ---------------------------------------------------------------------------
 
 def _build_user_prompt(idea: dict, gap_notes: List[str],
-                       venue_summary: str, facts: Dict[str, Any]) -> str:
+                       venue_summary: str, facts: Dict[str, Any],
+                       gap_evidence_summary: str = "unknown") -> str:
     payload = {
         "idea": {
             "idea_id": idea.get("idea_id"),
@@ -511,6 +570,9 @@ def _build_user_prompt(idea: dict, gap_notes: List[str],
             "literature_refs": idea.get("literature_refs"),
         },
         "gap_notes": gap_notes,
+        # M18：gap 假设证据级别（weak/moderate/strong/unknown），Gap 维度打分时参考：
+        # weak 说明「差异主张」证据弱，应保守给分
+        "gap_evidence": gap_evidence_summary,
         "venue_distribution": venue_summary,
         "facts": facts,
     }
@@ -520,13 +582,14 @@ def _build_user_prompt(idea: dict, gap_notes: List[str],
 
 def _call_llm(llm: LLMProvider, system_prompt: str, idea: dict,
               gap_notes: List[str], venue_summary: str,
-              facts: Dict[str, Any]) -> Dict[str, Any]:
+              facts: Dict[str, Any],
+              gap_evidence_summary: str = "unknown") -> Dict[str, Any]:
     """调用 LLM；任何失败/空结果都返回空 dict，由上层降级。"""
     result: Dict[str, Any] = {}
     try:
         result = llm.complete(
             system_prompt,
-            _build_user_prompt(idea, gap_notes, venue_summary, facts),
+            _build_user_prompt(idea, gap_notes, venue_summary, facts, gap_evidence_summary),
             EVALUATE_SCHEMA, temperature=0.2,
         )
     except (LLMError, SchemaError):
@@ -537,7 +600,8 @@ def _call_llm(llm: LLMProvider, system_prompt: str, idea: dict,
 
 
 def _build_batch_user_prompt(ideas: List[dict], gap_notes: List[str],
-                             venue_summary: str, facts: Dict[str, Any]) -> str:
+                             venue_summary: str, facts: Dict[str, Any],
+                             gap_evidence_summary: str = "unknown") -> str:
     """构造批量评估的脱敏输入：一组 idea + 共享证据（gap_notes / venue 分布 / facts）。"""
     payload = {
         "ideas": [
@@ -552,6 +616,8 @@ def _build_batch_user_prompt(ideas: List[dict], gap_notes: List[str],
             if isinstance(idea, dict)
         ],
         "gap_notes": gap_notes,
+        # M18：gap 假设证据级别（weak/moderate/strong/unknown），Gap 维度打分时参考
+        "gap_evidence": gap_evidence_summary,
         "venue_distribution": venue_summary,
         "facts": facts,
     }
@@ -563,7 +629,8 @@ def _build_batch_user_prompt(ideas: List[dict], gap_notes: List[str],
 
 def _call_llm_batch(llm: LLMProvider, system_prompt: str, ideas: List[dict],
                     gap_notes: List[str], venue_summary: str,
-                    facts: Dict[str, Any]) -> Optional[Dict[str, dict]]:
+                    facts: Dict[str, Any],
+                    gap_evidence_summary: str = "unknown") -> Optional[Dict[str, dict]]:
     """M15 方向④：批量评估多个 idea（一次 LLM 调用），返回 ``{idea_id: 单条评估 dict}``。
 
     失败 / 空结果 / 结构非法 → 返回 None（由 run 回退到单条 ``_call_llm`` + 确定性兜底）。
@@ -574,7 +641,7 @@ def _call_llm_batch(llm: LLMProvider, system_prompt: str, ideas: List[dict],
     try:
         result = llm.complete(
             system_prompt,
-            _build_batch_user_prompt(ideas, gap_notes, venue_summary, facts),
+            _build_batch_user_prompt(ideas, gap_notes, venue_summary, facts, gap_evidence_summary),
             EVALUATE_BATCH_SCHEMA, temperature=0.2,
         )
     except (LLMError, SchemaError):
@@ -623,7 +690,8 @@ def _dims_converged(dims: Dict[str, Any]) -> bool:
 
 def _assemble_evidence(gap_notes: List[str], facts: Dict[str, Any],
                        venue_dist: Dict[str, int], dims: Dict[str, Any],
-                       degraded: bool, converged: bool) -> List[dict]:
+                       degraded: bool, converged: bool,
+                       gap_evidence_levels: Optional[List[str]] = None) -> List[dict]:
     """装配评估证据链（provenance 强制：每条结论挂证据源，含 M11 分维度明细）。"""
     evidence: List[dict] = []
     if gap_notes:
@@ -632,6 +700,13 @@ def _assemble_evidence(gap_notes: List[str], facts: Dict[str, Any],
     else:
         evidence.append({"source": "literature.gap_note",
                          "note": "文献为空，novelty 无法对照，按规则保守估计"})
+    # M18：gap 假设证据级别挂进证据链（weak 时 Gap 维度打折的依据可见）
+    if gap_evidence_levels:
+        evidence.append({
+            "source": "literature.gap_hypothesis",
+            "note": "gap 假设证据级别：{}（{} 条 gap/矛盾；weak 时 novelty 的 Gap 维度打折）".format(
+                _gap_evidence_summary(gap_evidence_levels), len(gap_evidence_levels)),
+        })
     data = facts.get("data") or []
     if data:
         evidence.append({"source": "assets.facts.data", "note": "数据标签：" + "、".join(data)})
@@ -695,21 +770,26 @@ def _evaluate_idea(idea: dict, facts: Dict[str, Any], gap_notes: List[str],
                    data_feasibility: str, literature: List[dict],
                    llm: LLMProvider, system_prompt: str,
                    llm_out: Optional[Dict[str, Any]] = None,
-                   ev_validation: Optional[Dict[str, Any]] = None) -> dict:
+                   ev_validation: Optional[Dict[str, Any]] = None,
+                   gap_evidence_levels: Optional[List[str]] = None) -> dict:
     """对单个 idea 做证据驱动评估，返回一条 evaluation dict（含 M11 多维 novelty + M12 证据强度）。
 
     ``llm_out`` / ``ev_validation`` 为 M15 批量路径注入的结果；为 None 时回退到单条调用，
     保证批量失败时逐条降级，绝不改变确定性兜底语义。
+    ``gap_evidence_levels``（M18）为 gap 假设证据级别列表，供 Gap 维度弱证据打折与证据链消费。
     """
     idea_id = str(idea.get("idea_id") or "").strip()
+    gap_evidence_summary = _gap_evidence_summary(gap_evidence_levels or [])
     out = llm_out if llm_out is not None else _call_llm(
-        llm, system_prompt, idea, gap_notes, venue_summary, facts)
+        llm, system_prompt, idea, gap_notes, venue_summary, facts, gap_evidence_summary)
 
     # M11：5 维度分（优先 LLM，否则确定性粗估），加权合成 0~100 总分
     dims = _extract_dimensions(out.get("novelty_dimensions"))
     degraded = dims is None
     if degraded:
         dims = _deterministic_dimensions(idea, gap_notes, facts)
+    # M18：gap 假设证据级别 weak → Gap 维度硬打折（LLM 与确定性路径统一生效）
+    dims = _apply_gap_evidence_discount(dims, gap_evidence_levels)
     novelty = _weighted_total(dims)
     band_label, _ = _score_band(novelty)
     converged = _dims_converged(dims)
@@ -740,7 +820,8 @@ def _evaluate_idea(idea: dict, facts: Dict[str, Any], gap_notes: List[str],
                                    float(workload), llm_rework_reason,
                                    evidence_strength=evidence_strength,
                                    evidence_reason=evidence_reason)
-    evidence = _assemble_evidence(gap_notes, facts, venue_dist, dims, degraded, converged)
+    evidence = _assemble_evidence(gap_notes, facts, venue_dist, dims, degraded, converged,
+                                  gap_evidence_levels)
     _append_evidence_validation(evidence, ev_validation)
 
     return {
@@ -783,11 +864,14 @@ def run(dossier: Dossier, llm: LLMProvider) -> None:
     venue_dist = _venue_distribution(literature)
     venue_summary = _format_venue_distribution(venue_dist)
     data_feasibility = _data_feasibility(facts)
+    gap_evidence_levels = _gap_evidence_levels(literature)
+    gap_evidence_summary = _gap_evidence_summary(gap_evidence_levels)
     system_prompt, version = _load_prompt()
 
     # M15 方向④：批量推理——多个 idea 的评估 + 证据审查各合并成一次 LLM 调用。
     # 批量失败 / 某 idea 缺失时，逐条回退（保证确定性兜底语义不变）。
-    eval_batch = _call_llm_batch(llm, system_prompt, ideas, gap_notes, venue_summary, facts)
+    eval_batch = _call_llm_batch(llm, system_prompt, ideas, gap_notes, venue_summary,
+                                 facts, gap_evidence_summary)
     evidence_batch = validate_evidence_batch(ideas, literature, llm, facts)
 
     def _eval_one(idea: dict) -> dict:
@@ -797,6 +881,7 @@ def run(dossier: Dossier, llm: LLMProvider) -> None:
             data_feasibility, literature, llm, system_prompt,
             llm_out=eval_batch.get(idea_id) if eval_batch else None,
             ev_validation=evidence_batch.get(idea_id) if evidence_batch else None,
+            gap_evidence_levels=gap_evidence_levels,
         )
 
     # M16 方向⑥：多个 idea 的评估并行执行（结果保持 idea 顺序）。

@@ -19,6 +19,7 @@ from unittest import mock
 from papermine.agents.evaluate import (
     EVALUATE_SCHEMA,
     NOVELTY_DIMENSIONS,
+    _apply_gap_evidence_discount,
     _data_feasibility,
     _decide_verdict,
     _deterministic_dimensions,
@@ -379,6 +380,36 @@ class DeterministicDimensionsTest(unittest.TestCase):
         self.assertLessEqual(dims["gap"]["score"], 2.0)
         self.assertGreaterEqual(_weighted_total(dims), 0)
         self.assertLessEqual(_weighted_total(dims), 100)
+
+
+class GapEvidenceDiscountTest(unittest.TestCase):
+    """M18：gap 假设证据级别 weak → Gap 维度 novelty 打折（moderate/strong/无 不打折）。"""
+
+    def _dims(self, gap_score=4.0):
+        return {
+            "problem_novelty": {"score": 4, "reason": "r"},
+            "method_novelty": {"score": 4, "reason": "r"},
+            "technical_depth": {"score": 3, "reason": "r"},
+            "gap": {"score": gap_score, "reason": "与 SOTA 差异明确"},
+            "generalization": {"score": 3, "reason": "r"},
+        }
+
+    def test_weak_gap_evidence_discounts_gap_dimension(self) -> None:
+        dims = _apply_gap_evidence_discount(self._dims(4.0), ["weak"])
+        self.assertEqual(dims["gap"]["score"], 2.4)   # 4.0 × 0.6
+        self.assertIn("证据级别=weak", dims["gap"]["reason"])
+        # 其他维度不受影响
+        self.assertEqual(dims["method_novelty"]["score"], 4)
+
+    def test_moderate_strong_and_absent_no_discount(self) -> None:
+        self.assertEqual(_apply_gap_evidence_discount(self._dims(4.0), ["moderate"])["gap"]["score"], 4.0)
+        self.assertEqual(_apply_gap_evidence_discount(self._dims(4.0), ["strong"])["gap"]["score"], 4.0)
+        self.assertEqual(_apply_gap_evidence_discount(self._dims(4.0), [])["gap"]["score"], 4.0)
+        self.assertEqual(_apply_gap_evidence_discount(self._dims(4.0), None)["gap"]["score"], 4.0)
+
+    def test_mixed_weak_and_strong_no_discount(self) -> None:
+        # 非「全 weak」不打折（存在 strong 证据）
+        self.assertEqual(_apply_gap_evidence_discount(self._dims(4.0), ["weak", "strong"])["gap"]["score"], 4.0)
 
 
 class WeightedTotalTest(unittest.TestCase):

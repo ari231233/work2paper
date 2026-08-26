@@ -33,6 +33,7 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from ..literature import _entry_gap_evidence_levels, _literature_gap_evidence_levels
 from ..llm import LLMError, LLMProvider, SchemaError, complete_fast
 
 __all__ = [
@@ -208,6 +209,16 @@ def _all_papers(literature: List[dict]) -> List[dict]:
     return papers
 
 
+def _gap_evidence_weak(literature: List[dict]) -> bool:
+    """gap 假设证据是否整体偏弱（有 gap 假设且全为 weak）——M18 供「文献对拍」打折。
+
+    absence of evidence ≠ evidence of absence：gap 假设证据级别 weak 时，即便 idea 引用了
+    文献并给出差异化，其「文献对拍」结论也应打折（不能据此断言与 SOTA 有明确区别）。
+    """
+    levels = _literature_gap_evidence_levels(literature)
+    return bool(levels) and all(lv == "weak" for lv in levels)
+
+
 def _literature_summary(literature: List[dict]) -> List[dict]:
     """构造发给 LLM 的文献摘要（标题/摘要/venue/结构化理解，不含全文）。"""
     out: List[dict] = []
@@ -228,6 +239,8 @@ def _literature_summary(literature: List[dict]) -> List[dict]:
         out.append({
             "query": _clean(entry.get("query")),
             "gap_note": _clean(entry.get("gap_note")),
+            # M18：gap 假设证据级别（weak/moderate/strong），供「文献对拍」打折判断
+            "gap_evidence_levels": _entry_gap_evidence_levels(entry),
             "papers": papers,
         })
     return out
@@ -379,6 +392,7 @@ def _deterministic_checks(idea: dict, literature: List[dict],
     facts = facts or {}
     data = facts.get("data") or []
     metrics = facts.get("metrics") or []
+    gap_weak = _gap_evidence_weak(literature)
 
     # 1) 文献对拍
     if not papers:
@@ -400,6 +414,15 @@ def _deterministic_checks(idea: dict, literature: List[dict],
         similar = {
             "status": "concern",
             "note": "有 {} 篇可比文献，但 idea 未引用任何文献，无法确认已做过对拍".format(len(papers)),
+        }
+
+    # M18：gap 假设证据级别整体 weak 时，「文献对拍」结论打折（ok → concern）。
+    # 依据不足的对拍不能支撑「与 SOTA 有明确区别」的结论（evidence 强度随之下调）。
+    if gap_weak and similar["status"] == "ok":
+        similar = {
+            "status": "concern",
+            "note": "{}；但 gap 假设证据级别=weak（检索样本/系统性/相关性不足），文献对拍结论打折".format(
+                similar["note"]),
         }
 
     # 2) 理论支撑

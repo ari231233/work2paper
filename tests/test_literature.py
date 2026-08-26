@@ -15,9 +15,13 @@ from papermine.literature import (
     BATCH_EVIDENCE_CARD_SCHEMA,
     BATCH_UNDERSTANDING_SCHEMA,
     EVIDENCE_CARD_SCHEMA,
+    EVIDENCE_LEVELS,
+    GAP_HYPOTHESIS_SCHEMA,
     HYPOTHESIS_SCHEMA,
     MINING_SCHEMA,
+    _compute_evidence_level,
     _evidence_source_for,
+    _soften_universal,
     analyze_literature,
 )
 
@@ -367,6 +371,80 @@ class AnalyzeLiteratureParallelTest(unittest.TestCase):
         hyp_ids = [h["hypothesis_id"] for e in lit for h in e["hypotheses"]]
         self.assertEqual(gap_ids, ["g1", "g2", "g3"])
         self.assertEqual(hyp_ids, ["h1", "h2", "h3"])
+
+
+class EvidenceLevelTest(unittest.TestCase):
+    """M18：gap 从「事实断言」改为「证据有界的假设」（gap_hypothesis）+ 证据级别 evidence_level。"""
+
+    def test_gap_records_are_hypothesis_form(self):
+        lit = [_entry([_paper("Paper A")])]
+        analyze_literature(lit, NullProvider())
+        gaps = [g for g in lit[0]["contradiction_graph"]["gaps"] if g["type"] == "gap"]
+        self.assertGreaterEqual(len(gaps), 1)
+        gh = gaps[0]["gap_hypothesis"]
+        self.assertEqual(sorted(gh.keys()), sorted(["claim", "evidence_level", "basis", "scope"]))
+        # claim 恒为「尚未发现…（假设，非事实）」假设形式
+        self.assertTrue(gh["claim"].startswith("尚未发现"))
+        self.assertIn("假设，非事实", gh["claim"])
+        # basis / scope 界定证据边界
+        self.assertIn("基于检索到的", gh["basis"])
+        self.assertIn("检索范围", gh["scope"])
+        self.assertIn(gh["evidence_level"], EVIDENCE_LEVELS)
+        # 无全称断言（如「领域无人做」）
+        self.assertNotIn("领域无人", gh["claim"])
+        self.assertNotIn("领域无人", gh["basis"])
+        self.assertNotIn("整个领域", gh["claim"])
+
+    def test_contradiction_is_positive_evidence_strong(self):
+        papers = [_paper("Paper A"), _paper("Paper B")]
+
+        def handler(system, user, schema, temperature=0.2):
+            if schema is MINING_SCHEMA:
+                return {
+                    "gaps": [],
+                    "contradictions": [{
+                        "claim_point": "异常检测是否需要标注",
+                        "description": "A 主张无需标注，B 主张需要标注",
+                        "paper_a": "Paper A", "paper_b": "Paper B",
+                    }],
+                }
+            return {}
+        lit = [_entry(papers)]
+        analyze_literature(lit, _StubLLM(handler=handler))
+        cont = [g for g in lit[0]["contradiction_graph"]["gaps"]
+                if g["type"] == "contradiction"][0]
+        # 矛盾 = 正证据（有反例），证据级别天然 strong
+        self.assertEqual(cont["evidence_level"], "strong")
+
+    def test_compute_evidence_level_reflects_evidence_amount(self):
+        # 样本量 + 系统性 + 相关性 + 反例共同决定（docs/build-plan.md §4 M18 要点 2）
+        self.assertEqual(_compute_evidence_level(0, 1, 0), "weak")
+        self.assertEqual(_compute_evidence_level(1, 1, 1), "weak")        # 样本不足
+        self.assertEqual(_compute_evidence_level(3, 1, 3), "moderate")    # 中等样本
+        self.assertEqual(_compute_evidence_level(8, 2, 3), "strong")      # 大样本 + 双源 + 相关
+        self.assertEqual(_compute_evidence_level(8, 2, 1), "moderate")    # 样本多但相关少 → 降档
+        self.assertEqual(_compute_evidence_level(5, 2, 5), "strong")      # 双源 + 全相关
+        self.assertEqual(_compute_evidence_level(8, 2, 3, counterexample=True), "weak")  # 有反例 → 削弱
+
+    def test_soften_universal_assertions(self):
+        softened = _soften_universal("整个领域没人做这件事")
+        self.assertIn("假设，非事实", softened)
+        self.assertNotIn("没人做", softened)
+        self.assertNotIn("整个领域", softened)
+        # 无全称断言的文本不改动
+        clean = "基于检索到的论文，未发现统一框架"
+        self.assertEqual(_soften_universal(clean), clean)
+
+    def test_gap_hypothesis_schema_contract(self):
+        self.assertEqual(GAP_HYPOTHESIS_SCHEMA["type"], "object")
+        self.assertEqual(
+            sorted(GAP_HYPOTHESIS_SCHEMA["required"]),
+            sorted(["claim", "evidence_level", "basis", "scope"]),
+        )
+        self.assertEqual(
+            GAP_HYPOTHESIS_SCHEMA["properties"]["evidence_level"]["enum"],
+            list(EVIDENCE_LEVELS),
+        )
 
 
 if __name__ == "__main__":

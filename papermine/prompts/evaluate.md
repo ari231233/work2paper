@@ -10,6 +10,9 @@
 - `idea`：候选创新点——`claim`（一句话主张）、`novelty_hypothesis`（新颖性假设）、
   `problem_ref`、`literature_refs`（引用的文献）。
 - `gap_notes`：检索到的文献 gap 笔记，是 novelty 对拍的**唯一依据**。
+- `gap_evidence`：gap 假设的证据级别（weak / moderate / strong / unknown），由系统按检索
+  样本量 / 系统性 / 相关性 / 反例确定性计算；**weak 说明「与 SOTA 的差异主张」证据不足**，
+  打 `gap` 维度分时应保守（打折），不得因「没人做」而给高分（absence of evidence ≠ evidence of absence）。
 - `facts`：项目事实（assets.facts 六元组：任务 / 方法 / 数据 / 场景 / 指标等）。
 - `venue_distribution`：检索论文的 venue 档位分布（供参考，档位由确定性规则计算，你无需输出）。
 
@@ -30,4 +33,6 @@
 1. **每维分数必须给出差异化理由**，必须引用 `gap_note` 或 `facts` 里的具体内容；不同维度不得复用同一句理由；
 2. **禁止所有维度给相同分数**——不同维度的证据强度必然不同，请从证据出发区分（避免评分趋同）；
 3. 文献缺失（`gap_notes` 为空）时，`problem_novelty` 与 `gap` 保守给 2~2.5 并说明「文献缺失，无法对拍」；
-4. 数据可得性、投稿档位由确定性规则计算，你不需要输出；不得编造文献或实验结果。
+4. 数据可得性、投稿档位由确定性规则计算，你不需要输出；不得编造文献或实验结果；
+5. `gap_evidence` 为 `weak` 时，`gap` 维度（与已有工作的差异程度）必须保守给分并在 reason 里
+   说明「gap 假设证据弱，差异主张需补检索」，禁止写成「领域无人做」一类全称断言。

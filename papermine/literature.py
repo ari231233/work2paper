@@ -20,6 +20,12 @@
 - 每条 literature 新增 ``contradiction_graph``：{nodes / edges / gaps}，其中 gaps 的
   ``type`` ∈ {contradiction, gap}，矛盾（contradiction）同时给出节点间 contradiction 边。
 - 每条 literature 新增 ``hypotheses``：每条 gap 对应一条可证伪假设（if-then + falsification）。
+- **M18（证据级别）**：每条 ``type="gap"`` 记录附 ``gap_hypothesis``
+  （{claim / evidence_level / basis / scope}），把「无人覆盖」从事实断言降级为
+  **证据有界的假设**。``evidence_level`` ∈ {weak, moderate, strong} 由检索样本量、
+  系统性、相关性、有无反例**确定性计算**（architecture §8「LLM 自评不可靠」），
+  禁止全称断言（**absence of evidence ≠ evidence of absence**）。矛盾
+  （``type="contradiction"``）是**正证据**（两篇论文结论冲突），``evidence_level`` 恒为 strong。
 
 降级路径（architecture §7 / §8）：无 LLM（NullProvider）、LLMError、SchemaError、或 LLM
 返回结构非法时，退化为确定性规则（词面级 understanding / 证据卡只做保守关键词抽取且
@@ -43,8 +49,19 @@ __all__ = [
     "EVIDENCE_CARD_SCHEMA",
     "BATCH_EVIDENCE_CARD_SCHEMA",
     "EVIDENCE_SOURCES",
+    "EVIDENCE_LEVELS",
+    "GAP_HYPOTHESIS_SCHEMA",
     "MAX_UNDERSTAND_PAPERS",
     "MAX_GAPS",
+    "_compute_evidence_level",
+    "_soften_universal",
+    "_hypothesis_claim",
+    "_hypothesis_basis",
+    "_hypothesis_scope",
+    "_build_gap_hypothesis",
+    "_gap_evidence_level",
+    "_entry_gap_evidence_levels",
+    "_literature_gap_evidence_levels",
     "_understand_deterministic",
     "_mine_deterministic",
     "_hypothesize_deterministic",
@@ -71,6 +88,39 @@ _CLAIM_STRENGTHS: Tuple[str, ...] = ("strong", "moderate", "weak")
 # 证据卡中由 LLM 从摘要提取的可空字段（缺失一律 null，绝不编造）；title / evidence_source 由系统确定性回填
 _EVIDENCE_FIELDS: Tuple[str, ...] = (
     "dataset", "baseline", "metric", "main_gain", "limitation", "claim_strength",
+)
+
+# M18：gap 假设的证据级别（注意与 M12 的 evidence∈{weak,medium,strong} 是两套不同概念：
+# 本枚举描述「gap 假设本身有多少证据」，M12 描述「idea 的 claim 有多少证据」）。
+EVIDENCE_LEVELS: Tuple[str, ...] = ("weak", "moderate", "strong")
+
+# 检索源 -> 展示名（供 gap_hypothesis.scope 渲染）
+_SOURCE_DISPLAY: Dict[str, str] = {
+    "arxiv": "arXiv",
+    "semantic_scholar": "Semantic Scholar",
+}
+
+# 全称断言标记（M18 禁止 gap 输出此类断言）：命中即软化为「基于本次检索」的假设式表述。
+# 排列顺序：更具体/更长的标记在前，避免部分替换导致歧义。
+_UNIVERSAL_MARKERS: Tuple[Tuple[str, str], ...] = (
+    ("所有论文均未", "检索到的论文均未"),
+    ("所有工作均未", "检索到的工作均未"),
+    ("领域内无人", "检索范围内未发现有人"),
+    ("领域无人", "检索范围内未发现有人"),
+    ("没有人做", "检索范围内未发现有人做"),
+    ("没人做过", "检索范围内未发现有人做过"),
+    ("没人做", "检索范围内未发现有人做"),
+    ("无人做过", "检索范围内未发现有人做过"),
+    ("无人研究", "检索范围内未发现相关研究"),
+    ("无人涉足", "检索范围内未发现相关工作"),
+    ("从未有人", "检索范围内未发现有人"),
+    ("从未提出", "检索范围内未发现提出"),
+    ("没有任何", "检索范围内未发现"),
+    ("尚无任何", "检索范围内未发现"),
+    ("缺乏任何", "检索范围内未发现"),
+    ("未见任何", "检索范围内未发现"),
+    ("整个领域", "检索范围"),
+    ("领域空白", "检索范围内未见明确覆盖"),
 )
 
 # ---------------------------------------------------------------------------
@@ -194,6 +244,21 @@ MINING_SCHEMA: Dict[str, Any] = {
     },
 }
 
+# gap 假设（M18）：由系统确定性构造（非 LLM 输出），作为 gap 记录的 ``gap_hypothesis`` 子对象。
+# claim 恒为「尚未发现…（假设，非事实）」形式；evidence_level 由检索样本量/系统性/相关性/反例
+# 确定性计算；basis/scope 标注证据边界。此 schema 仅作文档与测试契约，不参与 LLM 校验。
+GAP_HYPOTHESIS_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["claim", "evidence_level", "basis", "scope"],
+    "properties": {
+        "claim": {"type": "string"},
+        "evidence_level": {"type": "string", "enum": list(EVIDENCE_LEVELS)},
+        "basis": {"type": "string"},
+        "scope": {"type": "string"},
+    },
+}
+
 # 假设生成：与给定 gaps 顺序对齐的 if-then 可证伪假设
 HYPOTHESIS_SCHEMA: Dict[str, Any] = {
     "type": "object",
@@ -253,8 +318,11 @@ _MINING_SYSTEM = (
     "你是 papermine 的「矛盾与缺口挖掘器」。给定同一检索查询命中的多篇论文及其结构化理解，"
     "跨论文比较以找出可成为创新点的矛盾与缺口。\n"
     "规则：\n"
-    "1. gaps：找出这些论文都未覆盖的角度（例如某种约束、场景、数据设定、评测维度没人做），"
-    "每项给 claim_point（结论点/主题）、description（为何是缺口）、angle（无人覆盖的具体角度）；\n"
+    "1. gaps：找出这些论文都未覆盖的角度（例如某种约束、场景、数据设定、评测维度），"
+    "每项给 claim_point（结论点/主题）、description（为何是缺口）、angle（未被覆盖的具体角度）。"
+    "description 必须写成「基于检索到的论文，未发现…」的**证据有界假设**，"
+    "只能断言「检索到的这些论文没做」，**禁止全称断言**（如「整个领域无人做」「所有论文均未」「没有任何工作」）；"
+    "证据级别（evidence_level）由系统按检索样本量/系统性/相关性/反例确定性计算，你无需输出；\n"
     "2. contradictions：找出同一结论点上结论互相冲突的论文对，每项给 claim_point、"
     "description（冲突在哪）、paper_a 与 paper_b（两篇论文标题，必须逐字等于给定标题）。\n"
     "宁缺毋滥，无矛盾或无缺口时给空数组。只输出 JSON，严格满足给定 schema。"
@@ -615,8 +683,8 @@ def _mine_deterministic(entry: Dict[str, Any],
     titles = [t for t in (_paper_title(p) for p in papers) if t]
     angle = _clean(entry.get("query")) or "本项目关注的角度"
     desc = (
-        "检索到 {} 篇相关文献（{}）；未识别到明确的结论冲突，{} 这一角度在检索结果中"
-        "缺少显式覆盖（离线降级，需人工核验）".format(len(papers), "、".join(titles[:3]) or "无标题", angle)
+        "基于检索到的 {} 篇论文（{}），尚未发现「{}」这一角度被明确覆盖"
+        "（假设，非事实，离线降级，需人工核验）".format(len(papers), "、".join(titles[:3]) or "无标题", angle)
     )
     return [{"claim_point": angle, "description": desc, "angle": angle}], []
 
@@ -628,9 +696,160 @@ def _assign_gap_ids(gap_records: List[Dict[str, Any]], start: int) -> List[Dict[
     return gap_records
 
 
-def _build_graph(papers: List[Dict[str, Any]], gaps: List[Dict[str, str]],
-                 contradictions: List[Dict[str, str]], start_id: int) -> Dict[str, Any]:
-    """把 gap/矛盾记录组装成 contradiction_graph（nodes/edges/gaps），gap_id 全局唯一。"""
+# ---------------------------------------------------------------------------
+# M18：gap 假设 + 证据级别（evidence_level）
+# ---------------------------------------------------------------------------
+
+def _soften_universal(text: str) -> str:
+    """把 gap 描述里的全称断言软化为「基于本次检索」的假设式表述（M18 核心原则）。
+
+    absence of evidence ≠ evidence of absence：LLM 只能证明「检索到的论文没做」，
+    不能证明「整个领域没人做」。命中全称断言标记时替换为检索范围内的观察，并追加
+    「假设，非事实，仅基于本次检索」提示。
+    """
+    s = _clean(text)
+    if not s:
+        return s
+    changed = False
+    for bad, good in _UNIVERSAL_MARKERS:
+        if bad in s:
+            s = s.replace(bad, good)
+            changed = True
+    if changed:
+        s += "（假设，非事实，仅基于本次检索）"
+    return s
+
+
+def _source_names(sources: Any) -> str:
+    """把 sources（如 ['arxiv','semantic_scholar']）渲染为展示名（arXiv、Semantic Scholar）。"""
+    names: List[str] = []
+    for s in (sources or []):
+        key = str(s).strip().lower()
+        names.append(_SOURCE_DISPLAY.get(key, str(s).strip()))
+    names = [n for n in names if n]
+    return "、".join(names) if names else "未知来源"
+
+
+def _gap_terms(text: Any) -> List[str]:
+    """把 claim_point/angle 拆成显著词（ASCII 词 + CJK 双字词），用于相关性/反例的确定性判定。"""
+    s = _clean(text).lower()
+    if not s:
+        return []
+    terms: List[str] = list(re.findall(r"[a-z0-9][a-z0-9\-]{1,}", s))
+    cjk = "".join(ch for ch in s if "\u4e00" <= ch <= "\u9fff")
+    terms.extend(cjk[i:i + 2] for i in range(len(cjk) - 1))
+    return terms
+
+
+def _paper_corpus(paper: Dict[str, Any]) -> str:
+    """论文的可检索文本：标题 + 摘要 + 结构化理解的 claim/method/conclusion。"""
+    parts = [_paper_title(paper), _clean(paper.get("abstract"))]
+    u = paper.get("understanding")
+    if isinstance(u, dict):
+        parts.extend([_clean(u.get("claim")), _clean(u.get("method")), _clean(u.get("conclusion"))])
+    return " ".join(p for p in parts if p).lower()
+
+
+def _gap_evidence_stats(entry: Dict[str, Any], papers: List[Dict[str, Any]],
+                        gap: Dict[str, Any]) -> Tuple[int, bool]:
+    """确定性地估算 gap 的相关论文数与反例（M18 evidence_level 的输入信号）。
+
+    - ``n_relevant``：标题/摘要/理解与 gap 的 claim_point 共享显著词的论文数（相关性代理）；
+    - ``counterexample``：angle 与 claim_point 不同、且某篇论文正文直接命中 angle 显著词
+      （提示该「无人覆盖的角度」可能已被覆盖，声明被削弱）。
+    """
+    point_terms = _gap_terms(gap.get("claim_point")) or _gap_terms(gap.get("angle"))
+    angle_terms = _gap_terms(gap.get("angle"))
+    point = _clean(gap.get("claim_point"))
+    angle = _clean(gap.get("angle"))
+    n_relevant = 0
+    counterexample = False
+    for p in papers:
+        corpus = _paper_corpus(p)
+        if not corpus:
+            continue
+        if any(t in corpus for t in point_terms):
+            n_relevant += 1
+        if angle and angle != point and angle_terms and any(t in corpus for t in angle_terms):
+            counterexample = True
+    return n_relevant, counterexample
+
+
+def _compute_evidence_level(n_papers: int, n_sources: int,
+                            n_relevant: int, counterexample: bool = False) -> str:
+    """M18：由检索样本量、系统性、相关性、有无反例确定性计算 gap 假设的证据级别。
+
+    规则（docs/build-plan.md §4 M18）：
+    - 反例（检索到直接覆盖该 gap 角度的论文）或零样本 → weak（假设被削弱 / 无证据）；
+    - 样本量：N ≥ 6 → strong 档，3 ≤ N < 6 → moderate 档，N < 3 → weak 档；
+    - 系统性：≥ 2 个检索源（arXiv + Semantic Scholar）升一档（封顶 strong）；
+    - 相关性：与 gap 角度相关的论文 < 2 篇 → 降一档（样本虽多但不相关，证据弱）。
+    """
+    if counterexample or n_papers <= 0:
+        return "weak"
+    if n_papers >= 6:
+        level = 2
+    elif n_papers >= 3:
+        level = 1
+    else:
+        level = 0
+    if n_sources >= 2:
+        level = min(2, level + 1)
+    if n_relevant < 2:
+        level = max(0, level - 1)
+    return EVIDENCE_LEVELS[level]
+
+
+def _hypothesis_claim(claim_point: Any, angle: Any) -> str:
+    """构造 gap 假设的 claim（恒为「尚未发现…（假设，非事实）」形式，杜绝全称断言）。"""
+    point = _clean(claim_point) or "该方向"
+    ang = _clean(angle)
+    if not ang or ang == point:
+        return "尚未发现{}（假设，非事实，仅基于本次检索）".format(point)
+    return "尚未发现{}方面的{}（假设，非事实，仅基于本次检索）".format(point, ang)
+
+
+def _hypothesis_basis(n_papers: int, n_relevant: int,
+                      claim_point: Any, angle: Any) -> str:
+    """构造 gap 假设的 basis（「基于 N 篇论文…均未…」，证据边界显式可见）。"""
+    point = _clean(claim_point) or "该方向"
+    ang = _clean(angle)
+    target = ang if (ang and ang != point) else point
+    if n_relevant >= 1:
+        return "基于检索到的 {} 篇论文，其中 {} 篇与「{}」相关，但均未明确提出「{}」".format(
+            n_papers, n_relevant, point, target)
+    return "基于检索到的 {} 篇论文，未发现明确覆盖「{}」的工作".format(n_papers, target)
+
+
+def _hypothesis_scope(query: Any, sources: Any, n_papers: int) -> str:
+    """构造 gap 假设的 scope（检索范围 + query + 论文数，界定证据边界）。"""
+    return "检索范围：{}，query {}，共 {} 篇".format(
+        _source_names(sources), _clean(query) or "（未命名）", n_papers)
+
+
+def _build_gap_hypothesis(entry: Dict[str, Any], papers: List[Dict[str, Any]],
+                          gap: Dict[str, Any]) -> Dict[str, Any]:
+    """为一条 gap 记录构造 gap_hypothesis（claim/evidence_level/basis/scope），全部确定性计算。"""
+    n_papers = len(papers)
+    sources = [s for s in (entry.get("sources") or []) if _clean(s)]
+    n_relevant, counterexample = _gap_evidence_stats(entry, papers, gap)
+    return {
+        "claim": _hypothesis_claim(gap.get("claim_point"), gap.get("angle")),
+        "evidence_level": _compute_evidence_level(
+            n_papers, len(sources), n_relevant, counterexample),
+        "basis": _hypothesis_basis(n_papers, n_relevant, gap.get("claim_point"), gap.get("angle")),
+        "scope": _hypothesis_scope(entry.get("query"), sources, n_papers),
+    }
+
+
+def _build_graph(entry: Dict[str, Any], papers: List[Dict[str, Any]],
+                 gaps: List[Dict[str, str]], contradictions: List[Dict[str, str]],
+                 start_id: int) -> Dict[str, Any]:
+    """把 gap/矛盾记录组装成 contradiction_graph（nodes/edges/gaps），gap_id 全局唯一。
+
+    M18：gap 型记录附 ``gap_hypothesis``（claim/evidence_level/basis/scope，确定性构造）、
+    ``description`` 经全称断言软化；矛盾型记录是正证据，``evidence_level`` 恒为 strong。
+    """
     titles = [t for t in (_paper_title(p) for p in papers) if t]
     nodes = [{"id": "p:{}".format(i), "label": t, "kind": "paper"} for i, t in enumerate(titles)]
     index = {t: "p:{}".format(i) for i, t in enumerate(titles)}
@@ -642,9 +861,9 @@ def _build_graph(papers: List[Dict[str, Any]], gaps: List[Dict[str, str]],
         gap_records.append({
             "gap_id": "",
             "type": "gap",
-            "claim_point": g.get("claim_point", ""),
-            "description": g.get("description", ""),
-            "angle": g.get("angle", ""),
+            "claim_point": _clean(g.get("claim_point")),
+            "description": _soften_universal(g.get("description", "")),
+            "angle": _clean(g.get("angle")),
             "paper_refs": [],
         })
 
@@ -653,10 +872,12 @@ def _build_graph(papers: List[Dict[str, Any]], gaps: List[Dict[str, str]],
         gap_records.append({
             "gap_id": "",
             "type": "contradiction",
-            "claim_point": c.get("claim_point", ""),
-            "description": c.get("description", ""),
+            "claim_point": _clean(c.get("claim_point")),
+            "description": _soften_universal(c.get("description", "")),
             "angle": "",
             "paper_refs": [a, b],
+            # 矛盾 = 正证据（两篇论文结论冲突），证据级别天然 strong
+            "evidence_level": "strong",
         })
         if a in index and b in index:
             edges.append({
@@ -667,6 +888,9 @@ def _build_graph(papers: List[Dict[str, Any]], gaps: List[Dict[str, str]],
             })
 
     _assign_gap_ids(gap_records, start_id)
+    for gr in gap_records:
+        if gr.get("type") == "gap":
+            gr["gap_hypothesis"] = _build_gap_hypothesis(entry, papers, gr)
     return {"nodes": nodes, "edges": edges, "gaps": gap_records}
 
 
@@ -768,6 +992,41 @@ def _entry_hypotheses(entry: Dict[str, Any]) -> List[Dict[str, Any]]:
     return [h for h in (entry.get("hypotheses") or []) if isinstance(h, dict) and h.get("hypothesis_id")]
 
 
+def _gap_evidence_level(gap: Dict[str, Any]) -> Optional[str]:
+    """读取一条 gap/矛盾记录的 evidence_level。
+
+    - gap 型记录在 ``gap_hypothesis.evidence_level`` 内；
+    - 矛盾型记录在顶层 ``evidence_level``（正证据，恒 strong）；
+    - 旧格式（无 M18 字段）返回 None。
+    """
+    if not isinstance(gap, dict):
+        return None
+    gh = gap.get("gap_hypothesis")
+    if isinstance(gh, dict) and gh.get("evidence_level") in EVIDENCE_LEVELS:
+        return gh["evidence_level"]
+    lv = gap.get("evidence_level")
+    return lv if lv in EVIDENCE_LEVELS else None
+
+
+def _entry_gap_evidence_levels(entry: Dict[str, Any]) -> List[str]:
+    """收集一个文献条目内全部 gap/矛盾的 evidence_level（保序、去空）。"""
+    out: List[str] = []
+    for g in _entry_gaps(entry):
+        lv = _gap_evidence_level(g)
+        if lv:
+            out.append(lv)
+    return out
+
+
+def _literature_gap_evidence_levels(literature: Any) -> List[str]:
+    """跨文献条目收集全部 gap/矛盾的 evidence_level（供 M11/M12 消费）。"""
+    out: List[str] = []
+    for entry in (literature or []):
+        if isinstance(entry, dict):
+            out.extend(_entry_gap_evidence_levels(entry))
+    return out
+
+
 # ---------------------------------------------------------------------------
 # 冻结入口（本模块内部编排，不改检索/ideate 的冻结签名）
 # ---------------------------------------------------------------------------
@@ -778,7 +1037,8 @@ def analyze_literature(literature: List[dict], llm: LLMProvider) -> List[dict]:
     - 每篇论文写 ``understanding``；
     - 每篇论文写 ``evidence_card``（M19 论文级证据卡，8 字段；提取不到一律 null，绝不编造，
       ``evidence_source`` 确定性回填）；
-    - 每条目写 ``contradiction_graph``（nodes/edges/gaps，gaps 的 type ∈ {gap, contradiction}）；
+    - 每条目写 ``contradiction_graph``（nodes/edges/gaps，gaps 的 type ∈ {gap, contradiction}；
+      gap 型附 ``gap_hypothesis``＝{claim/evidence_level/basis/scope}，矛盾型 ``evidence_level``=strong）；
     - 每条目写 ``hypotheses``（每条 gap 一条 if-then 可证伪假设）；
     - gap_id / hypothesis_id 全局唯一（跨条目不重号），供 idea 追溯引用。
 
@@ -809,7 +1069,7 @@ def analyze_literature(literature: List[dict], llm: LLMProvider) -> List[dict]:
     # 顺序赋全局唯一 gap_id（确定性，无网络 I/O）。
     gap_counter = 0
     for entry, (papers, gaps, conts) in zip(entries, mined):
-        graph = _build_graph(papers, gaps, conts, start_id=gap_counter)
+        graph = _build_graph(entry, papers, gaps, conts, start_id=gap_counter)
         entry["contradiction_graph"] = graph
         gap_counter += len(graph.get("gaps") or [])
 

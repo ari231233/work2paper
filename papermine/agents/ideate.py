@@ -30,7 +30,7 @@ from typing import Any, Dict, List
 
 from .. import storage
 from ..dossier import Dossier
-from ..literature import _entry_gaps, _entry_hypotheses, analyze_literature
+from ..literature import _entry_gaps, _entry_hypotheses, _gap_evidence_level, analyze_literature
 from ..llm import LLMError, LLMProvider, SchemaError
 from ..retrieval import search_literature
 
@@ -320,6 +320,7 @@ def _finalize_ideas(raw: List[dict], problems: List[dict], literature: List[dict
                 "source": "literature.contradiction_graph",
                 "gap_id": gid,
                 "type": gap.get("type"),
+                "evidence_level": _gap_evidence_level(gap),
                 "note": (gap.get("description") or "")[:200],
             })
 

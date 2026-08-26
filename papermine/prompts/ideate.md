@@ -12,7 +12,8 @@ hypotheses）与项目六元组事实（facts），均已在本地脱敏、不�
 - `problems`：研究问题列表，每项含 `problem_id` / `title` / `formulation` / `motivation` /
   `why_not_engineering` / `evidence_refs`。
 - `literature`：文献检索条目列表，每项含 `query` / `gap_note` / `papers`（仅标题/年份/来源）、
-  `gaps`（gap/矛盾，含 `gap_id` / `type` / `claim_point` / `description`）、
+  `gaps`（gap/矛盾，含 `gap_id` / `type` / `claim_point` / `description` / `gap_hypothesis`；
+  gap 型附 `gap_hypothesis`＝{claim / evidence_level / basis / scope}，矛盾型附 `evidence_level`）、
   `hypotheses`（可证伪假设，含 `hypothesis_id` / `gap_ref` / `statement` / `falsification`）。
 - `facts`：项目六元组（tasks / methods / data / scenarios / metrics / libraries / modules）。
 
@@ -24,6 +25,8 @@ hypotheses）与项目六元组事实（facts），均已在本地脱敏、不�
    在什么约束/场景/数据下存在尚未被充分研究的空间。禁止写成空泛的「很有价值」。
 4. **优先从给定 gaps / hypotheses 里生长 idea**（M5 v2）：每条 idea 的落脚点应对应某条
    gap/矛盾（结论冲突 or 无人覆盖的角度），而不是凭空组合术语；无 gap 时才允许按问题 + 事实兜底。
+   注意：gap 是**证据有界的假设**（`gap_hypothesis`），不是事实——证据级别（`evidence_level`）
+   为 weak 的 gap，只能作为「待验证方向」生长 idea，禁止把「检索范围内未发现」写成「领域无人做」。
 5. 每条 idea 必须挂 `problem_ref`，值必须来自给定 problems 中的 `problem_id`。
 6. 每条 idea 的 `literature_refs` **只能**引用给定 literature 中真实存在的论文标题，
    **禁止编造、禁止引用不存在于输入中的文献**。无相关文献时给空数组。

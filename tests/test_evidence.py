@@ -164,6 +164,44 @@ class AggregateEvidenceTest(unittest.TestCase):
         self.assertEqual(evidence, "medium")
 
 
+class GapEvidenceDiscountTest(unittest.TestCase):
+    """M18：gap 假设证据级别 weak → 文献对拍（similar_work）结论打折。"""
+
+    def _literature_with_gap_level(self, level):
+        literature = _literature(n_papers=1)
+        literature[0]["contradiction_graph"] = {
+            "nodes": [], "edges": [],
+            "gaps": [{
+                "gap_id": "g1", "type": "gap", "claim_point": "x",
+                "description": "基于检索到的 1 篇论文，未发现覆盖",
+                "angle": "", "paper_refs": [],
+                "gap_hypothesis": {
+                    "claim": "尚未发现x（假设，非事实）",
+                    "evidence_level": level,
+                    "basis": "基于检索到的 1 篇论文，未发现覆盖",
+                    "scope": "检索范围：arXiv，共 1 篇",
+                },
+            }],
+        }
+        return literature
+
+    def test_weak_gap_evidence_downgrades_similar_work(self) -> None:
+        idea = _idea(claim="提出一种与现有工作不同的改进方法", refs=["Paper 0"])
+        checks = _deterministic_checks(idea, self._literature_with_gap_level("weak"), {})
+        self.assertEqual(checks["similar_work"]["status"], "concern")
+        self.assertIn("证据级别=weak", checks["similar_work"]["note"])
+
+    def test_strong_gap_evidence_keeps_similar_work_ok(self) -> None:
+        idea = _idea(claim="提出一种与现有工作不同的改进方法", refs=["Paper 0"])
+        checks = _deterministic_checks(idea, self._literature_with_gap_level("strong"), {})
+        self.assertEqual(checks["similar_work"]["status"], "ok")
+
+    def test_no_gap_levels_keeps_original_status(self) -> None:
+        idea = _idea(claim="提出一种与现有工作不同的改进方法", refs=["Paper 0"])
+        checks = _deterministic_checks(idea, _literature(n_papers=1), {})
+        self.assertEqual(checks["similar_work"]["status"], "ok")
+
+
 class SchemaTest(unittest.TestCase):
     def test_schema_requires_evidence_reason_checks(self):
         self.assertEqual(EVIDENCE_SCHEMA["type"], "object")
