@@ -34,6 +34,7 @@ from typing import Any, Dict, List, Optional
 
 from . import experience, policy, storage, trace
 from .agents import abstract, evaluate, ideate, plan, reflect, understand
+from .agents.contribution import render_contribution_lines
 from .dossier import Dossier
 from .llm import NullProvider, get_provider
 
@@ -739,9 +740,17 @@ def _render_report_md(dossier: Dossier) -> str:
             band = ev.get("novelty_band")
             if band:
                 novelty_disp += "（{}）".format(band)
-            lines.append("- **{}**：novelty={}，数据可得性={}，工作量≈{}h，verdict={}".format(
-                ev.get("idea_ref"), novelty_disp, ev.get("data_feasibility"),
-                ev.get("workload_hours"), ev.get("verdict")))
+            contrib_lines = render_contribution_lines(ev)
+            if contrib_lines:
+                # M21：每个 idea 先输出「类型 + 贡献矩阵 + 攻击测试」，novelty 降级为参考维度
+                lines.extend(contrib_lines)
+                lines.append("  - novelty（参考维度）={}，数据可得性={}，工作量≈{}h，verdict={}".format(
+                    novelty_disp, ev.get("data_feasibility"),
+                    ev.get("workload_hours"), ev.get("verdict")))
+            else:
+                lines.append("- **{}**：novelty={}，数据可得性={}，工作量≈{}h，verdict={}".format(
+                    ev.get("idea_ref"), novelty_disp, ev.get("data_feasibility"),
+                    ev.get("workload_hours"), ev.get("verdict")))
             cal_lines = evaluate.render_calibration_lines(ev)
             dims = ev.get("novelty_dimensions")
             if cal_lines:

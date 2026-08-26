@@ -8,6 +8,8 @@ M11 增量：novelty 从单一 0~5 升级为 5 维加权（0~100 总分 + 分维
 M12 增量：每条 evaluation 附带 ``evidence_validation``（证据强度 weak/medium/strong + 理由 + 4 维检查）。
 M18 增量：gap 假设证据级别整体 weak → Gap 维度 novelty 打折。
 M20 增量：novelty 各维度从「LLM 自由打分」改为「规则 + LLM 解释」——LLM 只答题（rubric），分数由规则算出。
+M21 增量：评估前置「创新类型分类 + 贡献矩阵 + 攻击测试」（agents/contribution），
+novelty 分数降级为参考维度，verdict 按贡献类型差异化（模块组合类不再被直接 reject）。
 """
 from __future__ import annotations
 
@@ -25,6 +27,7 @@ from papermine.agents.evaluate import (
     _apply_gap_evidence_discount,
     _data_feasibility,
     _decide_verdict,
+    _decide_verdict_contribution,
     _deterministic_dimensions,
     _score_band,
     _tier_of,
@@ -32,6 +35,7 @@ from papermine.agents.evaluate import (
     run,
     score_rubric,
 )
+from papermine.agents.contribution import ATTACK_KEYS, MATRIX_DIMENSIONS
 from papermine.agents.evidence import CHECK_DIMENSIONS, EVIDENCE_LEVELS
 from papermine.agents.understand import run as understand_run
 from papermine.dossier import Dossier
@@ -46,22 +50,27 @@ _BANDS = ("Reject", "Weak Reject", "Revise", "Accept", "Priority")
 
 
 class _FakeLLM:
-    """按 schema 路由返回结果：evaluate / evidence 各分「批量」与「单条」两种路径。
+    """按 schema 路由返回结果：贡献分析 / evaluate / evidence 各分「批量」与「单条」两种路径。
 
+    - 批量贡献 schema（``results.items.required`` 含 ``contribution_type``）走 ``batch_contribution``；
     - 批量评估 schema（props 含 ``evaluations``）走 ``batch_results``，未提供时返回空批量
       （触发逐条回退，不消耗单条队列）；
-    - 批量证据 schema（props 含 ``results``）走 ``batch_evidence``，未提供时返回空批量；
+    - 批量证据 schema（``results.items.required`` 含 ``checks``/``evidence``）走 ``batch_evidence``；
+    - 单条贡献 schema（props 含 ``contribution_type``+``matrix``+``attacks``）走 ``contribution_results``；
     - 单条证据 schema（props 含 ``checks`` + ``evidence``）走 ``evidence_results``；
     - 单条评估 schema 走 ``results``。
     各自耗尽后返回空 dict（触发确定性兜底）。
     """
 
     def __init__(self, results=None, evidence_results=None, batch_results=None,
-                 batch_evidence=None, exc=None):
+                 batch_evidence=None, contribution_results=None,
+                 batch_contribution=None, exc=None):
         self.results = list(results or [])
         self.evidence_results = list(evidence_results or [])
         self.batch_results = list(batch_results or [])
         self.batch_evidence = list(batch_evidence or [])
+        self.contribution_results = list(contribution_results or [])
+        self.batch_contribution = list(batch_contribution or [])
         self.exc = exc
         self.calls = []
 
@@ -75,9 +84,21 @@ class _FakeLLM:
                 return self.batch_results.pop(0)
             return {"evaluations": []}
         if "results" in props:
+            items_req = ((props["results"].get("items") or {}).get("required")) or []
+            if "contribution_type" in items_req:
+                # M21 批量贡献分析
+                if self.batch_contribution:
+                    return self.batch_contribution.pop(0)
+                return {"results": []}
+            # M12 批量证据审查
             if self.batch_evidence:
                 return self.batch_evidence.pop(0)
             return {"results": []}
+        if "contribution_type" in props and "matrix" in props and "attacks" in props:
+            # M21 单条贡献分析
+            if self.contribution_results:
+                return self.contribution_results.pop(0)
+            return {}
         if "checks" in props and "evidence" in props:
             if self.evidence_results:
                 return self.evidence_results.pop(0)
@@ -156,6 +177,25 @@ def _llm_evidence(evidence="strong", reason="证据充分", checks=None):
         "reason": reason,
         "checks": checks if checks is not None else _evidence_checks(),
     }
+
+
+def _llm_contribution(ctype="B", matrix=None, attacks=None):
+    """构造一条 M21 贡献分析 LLM 输出（类型 + 贡献矩阵 + 攻击测试）。"""
+    return {
+        "contribution_type": {"type": ctype, "reason": "联合建模两个任务"},
+        "matrix": matrix if matrix is not None else {
+            d: {"strength": "medium", "reason": "r-{}".format(d)} for d in MATRIX_DIMENSIONS
+        },
+        "attacks": attacks if attacks is not None else {
+            k: {"attack": "攻击-{}".format(k), "answer": "回答-{}".format(k)}
+            for k in ATTACK_KEYS
+        },
+    }
+
+
+def _all_low_matrix():
+    """全低强度贡献矩阵（无可行贡献维度）。"""
+    return {d: {"strength": "low", "reason": "r-{}".format(d)} for d in MATRIX_DIMENSIONS}
 
 
 def _dossier(ideas=None, literature=None):
@@ -280,7 +320,11 @@ class RunTest(unittest.TestCase):
         self.assertTrue(any(s.startswith("evidence_validation.") for s in sources))
 
     def test_run_with_llm_uses_rubric_answers_and_rule_scores(self) -> None:
-        """M20：LLM 只答题（rubric），分数由规则引擎算出（novelty 不来自 LLM 直接打分）。"""
+        """M20：LLM 只答题（rubric），分数由规则引擎算出（novelty 不来自 LLM 直接打分）。
+
+        M21：novelty 分数不再作为直接 reject 依据——即便 novelty 分落在 Reject 段，
+        只要贡献矩阵可行（有维度 ≥ 中），verdict 也不再是 drop（按贡献类型差异化）。
+        """
         d = _dossier()
         answers_high = _answers_high()
         answers_low = _answers_low()
@@ -297,7 +341,8 @@ class RunTest(unittest.TestCase):
         self.assertEqual(d.evaluations[0]["verdict"], "proceed")
         self.assertIn(d.evaluations[0]["novelty_band"], ("Accept", "Priority"))
         self.assertEqual(d.evaluations[1]["novelty_band"], "Reject")
-        self.assertEqual(d.evaluations[1]["verdict"], "drop")
+        # M21：novelty 分 Reject 段不再直接 drop（贡献矩阵可行 → proceed）
+        self.assertEqual(d.evaluations[1]["verdict"], "proceed")
         # method_novelty 由模板三问规则算出，与规则引擎重算一致
         self.assertEqual(
             d.evaluations[0]["novelty_dimensions"]["method_novelty"]["score"],
@@ -323,7 +368,7 @@ class RunTest(unittest.TestCase):
         _assert_evidence_validation(self, d.evaluations[0]["evidence_validation"])
 
     def test_run_batches_evaluations_and_evidence(self) -> None:
-        """M15 方向④：多个 idea 的评估 + 证据审查各合并成一次 LLM 调用（2 次而非 4 次）。"""
+        """M15 方向④：贡献分析 + 评估 + 证据审查各合并成一次 LLM 调用（3 次而非 6 次）。"""
         d = _dossier()
         answers_high = _answers_high()
         answers_low = _answers_low()
@@ -337,17 +382,26 @@ class RunTest(unittest.TestCase):
             {"idea_id": "i1", **_llm_evidence(evidence="strong", reason="证据充分")},
             {"idea_id": "i2", **_llm_evidence(evidence="medium", reason="证据中等")},
         ]}
-        llm = _FakeLLM(batch_results=[batch_eval], batch_evidence=[batch_evidence])
+        batch_contribution = {"results": [
+            {"idea_id": "i1", **_llm_contribution(ctype="B")},
+            {"idea_id": "i2", **_llm_contribution(ctype="A")},
+        ]}
+        llm = _FakeLLM(batch_results=[batch_eval], batch_evidence=[batch_evidence],
+                       batch_contribution=[batch_contribution])
         run(d, llm)
 
         self.assertEqual(d.evaluations[0]["novelty_score"], _weighted_total(dims_high))
         self.assertEqual(d.evaluations[1]["novelty_score"], _weighted_total(dims_low))
         self.assertEqual(d.evaluations[0]["verdict"], "proceed")
-        self.assertEqual(d.evaluations[1]["verdict"], "drop")
+        # M21：i2 novelty 分低但贡献矩阵可行 → 不再 drop，而是 proceed
+        self.assertEqual(d.evaluations[1]["verdict"], "proceed")
         self.assertEqual(d.evaluations[0]["evidence_validation"]["evidence"], "strong")
         self.assertEqual(d.evaluations[1]["evidence_validation"]["evidence"], "medium")
-        # 只调 2 次 LLM（1 批量评估 + 1 批量证据），而非 2 idea × 2 调用 = 4 次
-        self.assertEqual(len(llm.calls), 2)
+        self.assertEqual(d.evaluations[0]["contribution"]["type"], "B")
+        self.assertEqual(d.evaluations[1]["contribution"]["type"], "A")
+        self.assertFalse(d.evaluations[0]["contribution"]["degraded"])
+        # 只调 3 次 LLM（1 批量贡献 + 1 批量评估 + 1 批量证据），而非 2 idea × 3 调用 = 6 次
+        self.assertEqual(len(llm.calls), 3)
 
     def test_run_batch_partial_falls_back_per_idea(self) -> None:
         """批量结果缺失某 idea 时，该 idea 逐条回退（不丢评估、不崩溃）。"""
@@ -359,16 +413,23 @@ class RunTest(unittest.TestCase):
         batch_evidence = {"results": [
             {"idea_id": "i1", **_llm_evidence(evidence="strong", reason="证据充分")},
         ]}
+        batch_contribution = {"results": [
+            {"idea_id": "i1", **_llm_contribution(ctype="B")},
+        ]}
         # i2 批量缺失 → 单条队列兜底
         llm = _FakeLLM(
             batch_results=[batch_eval], batch_evidence=[batch_evidence],
+            batch_contribution=[batch_contribution],
             results=[_llm_eval(answers=_answers(), workload=60)],
             evidence_results=[_llm_evidence(evidence="medium", reason="证据中等")],
+            contribution_results=[_llm_contribution(ctype="C")],
         )
         run(d, llm)
         self.assertEqual(len(d.evaluations), 2)
         self.assertEqual(d.evaluations[0]["evidence_validation"]["evidence"], "strong")
         self.assertEqual(d.evaluations[1]["evidence_validation"]["evidence"], "medium")
+        self.assertEqual(d.evaluations[0]["contribution"]["type"], "B")
+        self.assertEqual(d.evaluations[1]["contribution"]["type"], "C")
 
     def test_weak_evidence_forces_rework(self) -> None:
         """M12：evidence=weak 时即便 novelty 高也要回炉（rework），随 verdict 回炉到 ④。"""
@@ -386,11 +447,12 @@ class RunTest(unittest.TestCase):
         self.assertIn("evidence=weak", ev["rework_reason"])
 
     def test_weak_evidence_does_not_override_drop(self) -> None:
-        """M12：evidence=weak 不覆盖 drop（新颖性不足判死优先）。"""
+        """M21：无可行贡献（贡献矩阵全低）+ evidence=weak → drop 优先（不因弱证据上调为 rework）。"""
         d = _dossier()
         llm = _FakeLLM(
             results=[_llm_eval(answers=_answers_low(), workload=60, suggestion="proceed")],
             evidence_results=[_llm_evidence(evidence="weak", reason="无文献对拍")],
+            contribution_results=[_llm_contribution(ctype="A", matrix=_all_low_matrix())],
         )
         run(d, llm)
         self.assertEqual(d.evaluations[0]["evidence_validation"]["evidence"], "weak")
@@ -600,6 +662,60 @@ class VerdictTest(unittest.TestCase):
         self.assertEqual(_decide_verdict(75, "high", 60, None, evidence="medium"), "proceed")
 
 
+class VerdictContributionTest(unittest.TestCase):
+    """M21：verdict 按贡献类型差异化——novelty 分数不再作为直接 reject 依据。"""
+
+    def _contrib(self, matrix=None, ctype="B"):
+        return {
+            "type": ctype,
+            "matrix": matrix if matrix is not None else
+            {d: {"strength": "medium", "reason": "r"} for d in MATRIX_DIMENSIONS},
+        }
+
+    def test_combination_not_dropped_by_low_novelty(self) -> None:
+        """模块组合（框架创新中高）+ novelty 低 → 不再 drop，而是 proceed（M21 核心修正）。"""
+        matrix = _all_low_matrix()
+        matrix["framework"] = {"strength": "medium_high", "reason": "两个任务产生交互"}
+        verdict = _decide_verdict(30, "high", 60, None, evidence="medium",
+                                  contribution=self._contrib(matrix=matrix, ctype="B"))
+        self.assertEqual(verdict, "proceed")
+
+    def test_no_viable_contribution_drops(self) -> None:
+        """贡献矩阵全低（无任何维度 ≥ 中）→ drop，即便 novelty 分高。"""
+        verdict = _decide_verdict(75, "high", 60, None, evidence="medium",
+                                  contribution=self._contrib(matrix=_all_low_matrix(), ctype="A"))
+        self.assertEqual(verdict, "drop")
+
+    def test_viable_but_weak_evidence_rework(self) -> None:
+        verdict = _decide_verdict(75, "high", 60, None, evidence="weak",
+                                  contribution=self._contrib())
+        self.assertEqual(verdict, "rework")
+
+    def test_weak_evidence_does_not_override_drop_when_not_viable(self) -> None:
+        verdict = _decide_verdict(30, "high", 60, None, evidence="weak",
+                                  contribution=self._contrib(matrix=_all_low_matrix(), ctype="A"))
+        self.assertEqual(verdict, "drop")
+
+    def test_suggestion_rework_downgrades(self) -> None:
+        verdict = _decide_verdict(75, "high", 60, "rework", evidence="medium",
+                                  contribution=self._contrib())
+        self.assertEqual(verdict, "rework")
+
+    def test_legacy_no_contribution_still_band_maps(self) -> None:
+        """contribution=None 时保持旧分数段映射（向后兼容，纯函数可独立复用）。"""
+        self.assertEqual(_decide_verdict(30, "high", 60, "proceed"), "drop")
+        self.assertEqual(_decide_verdict(75, "high", 60, None), "proceed")
+
+    def test_decide_verdict_contribution_direct(self) -> None:
+        """_decide_verdict_contribution 纯函数：可行→proceed、弱证据→rework、不可行→drop。"""
+        contrib = self._contrib()
+        self.assertEqual(_decide_verdict_contribution("medium", None, contrib), "proceed")
+        self.assertEqual(_decide_verdict_contribution("weak", None, contrib), "rework")
+        self.assertEqual(_decide_verdict_contribution("medium", "rework", contrib), "rework")
+        not_viable = self._contrib(matrix=_all_low_matrix())
+        self.assertEqual(_decide_verdict_contribution("strong", None, not_viable), "drop")
+
+
 class VenueTierTest(unittest.TestCase):
     def test_tier_of_known_and_unknown(self) -> None:
         self.assertEqual(_tier_of("KDD"), "CCF-A")
@@ -673,7 +789,9 @@ class _ConcurrentEvalLLM:
             if "evaluations" in props:
                 return {"evaluations": []}          # 批量评估失败 → 逐条回退
             if "results" in props:
-                return {"results": []}              # 批量证据失败 → 逐条回退
+                return {"results": []}              # 批量贡献/证据失败 → 逐条回退
+            if "contribution_type" in props and "matrix" in props:
+                return {}                           # 单条贡献 → 确定性降级
             if "checks" in props and "evidence" in props:
                 return _llm_evidence(evidence="strong", reason="证据充分")
             return _llm_eval(answers=_answers(), workload=60, suggestion="proceed")

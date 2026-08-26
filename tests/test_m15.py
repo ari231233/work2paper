@@ -15,6 +15,7 @@ import unittest
 
 from papermine import retrieval
 from papermine.agents import evaluate
+from papermine.agents.contribution import ATTACK_KEYS, MATRIX_DIMENSIONS
 from papermine.dossier import Dossier
 
 _DIM_KEYS = tuple(k for k, _l, _w in evaluate.NOVELTY_DIMENSIONS)
@@ -73,6 +74,19 @@ class _CountingBatchLLM:
                  "verdict_suggestion": "proceed", "rework_reason": None}
                 for i in range(self.n)
             ]}
+        if "results" in props:
+            # M21 批量贡献分析（results.items.required 含 contribution_type）
+            items_req = ((props["results"].get("items") or {}).get("required")) or []
+            if "contribution_type" in items_req:
+                return {"results": [
+                    {"idea_id": "i{}".format(i + 1),
+                     "contribution_type": {"type": "B", "reason": "联合建模"},
+                     "matrix": {d: {"strength": "medium", "reason": "r"}
+                                for d in MATRIX_DIMENSIONS},
+                     "attacks": {k: {"attack": "a", "answer": "b"}
+                                 for k in ATTACK_KEYS}}
+                    for i in range(self.n)
+                ]}
         return {}
 
     def complete_fast(self, system, user, schema, temperature=0.2):
@@ -152,9 +166,9 @@ class ModelTieringTest(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class BatchInferenceTest(unittest.TestCase):
-    """多个 idea 的评估 + 证据审查合并为一次调用：3 个 idea 只需 2 次（而非 6 次）。"""
+    """多个 idea 的贡献分析 + 评估 + 证据审查合并为一次调用：3 个 idea 只需 3 次（而非 9 次）。"""
 
-    def test_evaluate_batches_into_two_calls(self):
+    def test_evaluate_batches_into_three_calls(self):
         d = _dossier(n_ideas=3)
         llm = _CountingBatchLLM(n_ideas=3)
         evaluate.run(d, llm)
@@ -163,10 +177,12 @@ class BatchInferenceTest(unittest.TestCase):
         for ev in d.evaluations:
             self.assertIn(ev["verdict"], ("proceed", "rework", "drop"))
             self.assertEqual(ev["evidence_validation"]["evidence"], "medium")
+            # M21：每个 idea 都产出贡献分析（类型 + 矩阵 + 攻击测试），先于 novelty 评分
+            self.assertIn(ev["contribution"]["type"], ("A", "B", "C", "D", "E"))
 
-        # 1 次批量评估（核心模型） + 1 次批量证据（快模型） = 2 次；
-        # 修复前逐个调用 = 3 idea × 2 = 6 次。
-        self.assertEqual(llm.core_calls, 1)
+        # 1 次批量贡献（核心模型） + 1 次批量评估（核心模型） + 1 次批量证据（快模型） = 3 次；
+        # 修复前逐个调用 = 3 idea × 3 = 9 次。
+        self.assertEqual(llm.core_calls, 2)
         self.assertEqual(llm.fast_calls, 1)
 
 

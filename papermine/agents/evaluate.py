@@ -34,6 +34,16 @@ M20 升级（Score Calibration，评分校准）：novelty 各维度从「LLM �
 - 无 LLM 时同样走规则引擎：由确定性信号对同一组问题作答（``_deterministic_answers``），
   再交 ``score_rubric`` 算分，保证离线路径同样可追溯、可复现。
 
+M21 升级（面向硕士的创新点理解）：评估从「novelty 打分 → accept/reject」改为
+**「创新类型分类 + 贡献矩阵 + 攻击测试」前置重构**（docs/build-plan.md §4 M21）：
+
+- 每个 idea 先调 ``agents/contribution.classify_contribution`` 得到 ``contribution``
+  （类型 A–E + 贡献矩阵 + 攻击测试），**先于** novelty 评分；
+- novelty 分数降级为「参考维度」，不再作为直接 reject 依据；
+- verdict 按贡献类型差异化（``_decide_verdict`` / ``_decide_verdict_contribution``）：
+  贡献矩阵有任一维度 ≥ 中 → 可行贡献，不因 novelty 低而直接 drop（模块组合类不再被误 reject）；
+  贡献矩阵无可行的贡献维度 → drop。
+
 M12 升级：与 novelty 评分**并列**加入「证据强度」子审查（docs/build-plan.md §4 M12）：
 
 - 调 ``agents/evidence.validate_evidence`` 对每个 idea 做 4 维证据审查
@@ -54,6 +64,11 @@ from ..dossier import Dossier
 from ..literature import _literature_gap_evidence_levels
 from ..llm import LLMError, LLMProvider, SchemaError
 from ..parallel import map_parallel
+from .contribution import (
+    classify_contribution,
+    classify_contribution_batch,
+    matrix_viable,
+)
 from .evidence import CHECK_DIMENSIONS, validate_evidence, validate_evidence_batch
 
 __all__ = [
@@ -71,6 +86,7 @@ __all__ = [
     "_weighted_total",
     "_score_band",
     "_decide_verdict",
+    "_decide_verdict_contribution",
     "_rework_reason",
     "_append_evidence_validation",
     "_guess_venue",
@@ -791,41 +807,85 @@ def _guess_venue(facts: Dict[str, Any], idea: dict,
 
 
 # ---------------------------------------------------------------------------
-# verdict 决策（分数段映射 + 证据驱动硬护栏 + LLM 建议）
+# verdict 决策（M21：按贡献类型差异化；novelty 降级为参考维度 + 证据驱动硬护栏）
 # ---------------------------------------------------------------------------
 
 def _decide_verdict(novelty: float, data_feasibility: str, workload: float,
-                    suggestion: Optional[str], evidence: str = "medium") -> str:
-    """综合 verdict：分数段映射旧 verdict 为基础，证据硬护栏优先，LLM 建议仅作下调参考。
+                    suggestion: Optional[str], evidence: str = "medium",
+                    contribution: Optional[dict] = None) -> str:
+    """综合 verdict。
 
-    M12：``evidence=weak``（证据不足以支撑 claim）时下调为 ``rework``（回炉到 ④ 细化 claim），
-    但**不覆盖 ``drop``**（新颖性不足判死时优先放弃）。
+    M21：novelty 分数降级为「参考维度」，不再作为直接 reject 依据；verdict 按贡献类型差异化。
+
+    - 硬约束（所有类型一致）：``data_feasibility=low`` → rework；``workload>400`` → rework；
+    - ``contribution`` 非 None（M21 主路径）：由贡献矩阵是否「有任一维度 ≥ 中」决定——
+      可行贡献 → 不因 novelty 低而直接 drop（``_decide_verdict_contribution``）；
+      无可行贡献 → drop；
+    - ``contribution`` 为 None（旧调用 / 无贡献分析）：退回 novelty 分数段映射旧 verdict，
+      保证本纯函数可独立复用（向后兼容）。
+
+    M12：``evidence=weak``（证据不足以支撑 claim）时下调为 ``rework``（回炉到 ④ 细化 claim）。
     """
     _band, base = _score_band(novelty)
     if data_feasibility == "low":
         return "rework"        # 无数据支撑，回炉补数据
     if workload > 400:
         return "rework"        # 工作量过大，需拆分或回炉
-    if data_feasibility == "medium" and base == "drop":
-        return "rework"        # 中低新颖性 + 数据不完整
-    # M12：证据强度弱 → 回炉细化 claim（仅下调，不把 drop 上调）
-    if evidence == "weak" and base != "drop":
+
+    if contribution is None:
+        # 旧路径（无贡献分析）：novelty 分数段作为参考映射
+        if data_feasibility == "medium" and base == "drop":
+            return "rework"    # 中低新颖性 + 数据不完整
+        # M12：证据强度弱 → 回炉细化 claim（仅下调，不把 drop 上调）
+        if evidence == "weak" and base != "drop":
+            return "rework"
+        # LLM 建议仅可下调（proceed -> rework/drop），不可把 drop 上调
+        if suggestion in ("drop", "rework") and base == "proceed":
+            return suggestion
+        return base
+
+    # M21：按贡献类型差异化 verdict（novelty 分数不再作为直接 reject 依据）
+    return _decide_verdict_contribution(evidence, suggestion, contribution)
+
+
+def _decide_verdict_contribution(evidence: str, suggestion: Optional[str],
+                                 contribution: dict) -> str:
+    """M21：按贡献矩阵是否可行决定 verdict（novelty 分数在此仅作参考）。
+
+    - 贡献矩阵无任一维度 ≥ 中 → 无可行贡献 → ``drop``；
+    - 可行贡献 + evidence=weak → ``rework``（回炉细化 claim，不 drop）；
+    - 可行贡献 + suggestion=rework → ``rework``（仅下调）；
+    - 其余（可行贡献 + 证据不弱 + 无硬阻塞）→ ``proceed``。
+
+    这样，模块组合类 idea（框架创新 / 应用创新 / 工程价值 ≥ 中）不再因 method novelty 低而被
+    直接 reject——这正是 M21 对硕士生评估的核心修正。
+    """
+    viable = matrix_viable((contribution or {}).get("matrix"))
+    if not viable:
+        return "drop"
+    if evidence == "weak":
         return "rework"
-    # LLM 建议仅可下调（proceed -> rework/drop），不可把 drop 上调
-    if suggestion in ("drop", "rework") and base == "proceed":
-        return suggestion
-    return base
+    if suggestion == "rework":
+        return "rework"
+    return "proceed"
 
 
 def _rework_reason(verdict: str, novelty: float, data_feasibility: str,
                    workload: float, llm_reason: Optional[str] = None,
                    evidence_strength: Optional[str] = None,
-                   evidence_reason: Optional[str] = None) -> Optional[str]:
-    """生成 rework_reason（proceed 时为 None）。M12：evidence=weak 时给出证据不足的专属理由。"""
+                   evidence_reason: Optional[str] = None,
+                   contribution: Optional[dict] = None) -> Optional[str]:
+    """生成 rework_reason（proceed 时为 None）。M12：evidence=weak 时给出证据不足的专属理由。
+
+    M21：drop 的措辞改为「无可行贡献」，novelty 仅作参考（不再说「新颖性不足 → 放弃」）。
+    """
     if verdict == "proceed":
         return None
     band_label, _ = _score_band(novelty)
     if verdict == "drop":
+        if contribution is not None:
+            return "无可行贡献：贡献矩阵各维度均未达「中」（novelty_score={} 仅作参考），无明确的论文贡献点，建议放弃".format(
+                novelty)
         return "新颖性不足：novelty_score={}（{}），与文献 gap 对拍无明显差异，建议放弃该创新点".format(
             novelty, band_label)
     if data_feasibility == "low":
@@ -1161,11 +1221,12 @@ def _evaluate_idea(idea: dict, facts: Dict[str, Any], gap_notes: List[str],
                    llm: LLMProvider, system_prompt: str,
                    llm_out: Optional[Dict[str, Any]] = None,
                    ev_validation: Optional[Dict[str, Any]] = None,
-                   gap_evidence_levels: Optional[List[str]] = None) -> dict:
-    """对单个 idea 做证据驱动评估，返回一条 evaluation dict（M11 多维 + M20 校准 + M18 打折 + M12 证据强度）。
+                   gap_evidence_levels: Optional[List[str]] = None,
+                   contribution_out: Optional[Dict[str, Any]] = None) -> dict:
+    """对单个 idea 做证据驱动评估，返回一条 evaluation dict（M21 贡献分析 + M11 多维 + M20 校准 + M18 打折 + M12 证据强度）。
 
-    ``llm_out`` / ``ev_validation`` 为 M15 批量路径注入的结果；为 None 时回退到单条调用，
-    保证批量失败时逐条降级，绝不改变确定性兜底语义。
+    ``llm_out`` / ``ev_validation`` / ``contribution_out`` 为 M15 批量路径注入的结果；
+    为 None 时回退到单条调用，保证批量失败时逐条降级，绝不改变确定性兜底语义。
     ``gap_evidence_levels``（M18）为 gap 假设证据级别列表，供 Gap 维度弱证据打折与证据链消费。
     """
     idea_id = str(idea.get("idea_id") or "").strip()
@@ -1204,19 +1265,27 @@ def _evaluate_idea(idea: dict, facts: Dict[str, Any], gap_notes: List[str],
     evidence_strength = ev_validation.get("evidence", "medium")
     evidence_reason = str(ev_validation.get("reason") or "").strip() or None
 
+    # M21：创新贡献分析（类型分类 + 贡献矩阵 + 攻击测试），先于 novelty 评分；
+    # 批量路径传入结果则复用，否则单条调用（失败则确定性兜底）。
+    contribution = contribution_out if contribution_out is not None \
+        else classify_contribution(idea, facts, literature, llm)
+
     venue_guess = _guess_venue(facts, idea, venue_dist, novelty)
     verdict = _decide_verdict(novelty, data_feasibility, float(workload),
-                              suggestion, evidence=evidence_strength)
+                              suggestion, evidence=evidence_strength,
+                              contribution=contribution)
     rework_reason = _rework_reason(verdict, novelty, data_feasibility,
                                    float(workload), llm_rework_reason,
                                    evidence_strength=evidence_strength,
-                                   evidence_reason=evidence_reason)
+                                   evidence_reason=evidence_reason,
+                                   contribution=contribution)
     evidence = _assemble_evidence(gap_notes, facts, venue_dist, dims, degraded, converged,
                                   gap_evidence_levels)
     _append_evidence_validation(evidence, ev_validation)
 
     return {
         "idea_ref": idea_id,
+        "contribution": contribution,
         "novelty_score": novelty,
         "novelty_band": band_label,
         "novelty_dimensions": dims,
@@ -1241,7 +1310,7 @@ def _evaluate_idea(idea: dict, facts: Dict[str, Any], gap_notes: List[str],
 # ---------------------------------------------------------------------------
 
 def run(dossier: Dossier, llm: LLMProvider) -> None:
-    """ideas -> evaluations（证据驱动，M11 多维 + M20 校准 + M18 打折 + M12 证据强度），原地写 dossier.evaluations。
+    """ideas -> evaluations（M21 贡献分析前置 + M11 多维 + M20 校准 + M18 打折 + M12 证据强度），原地写 dossier.evaluations。
 
     冻结契约（docs/build-plan.md §3.3）：
         def run(dossier: Dossier, llm: LLMProvider) -> None
@@ -1260,8 +1329,10 @@ def run(dossier: Dossier, llm: LLMProvider) -> None:
     gap_evidence_summary = _gap_evidence_summary(gap_evidence_levels)
     system_prompt, version = _load_prompt()
 
-    # M15 方向④：批量推理——多个 idea 的评估 + 证据审查各合并成一次 LLM 调用。
+    # M15 方向④：批量推理——贡献分析 / 评估 / 证据审查各合并成一次 LLM 调用。
+    # M21：贡献分析（类型 + 矩阵 + 攻击测试）**先于** novelty 评分，故先批量调用。
     # 批量失败 / 某 idea 缺失时，逐条回退（保证确定性兜底语义不变）。
+    contribution_batch = classify_contribution_batch(ideas, facts, literature, llm)
     eval_batch = _call_llm_batch(llm, system_prompt, ideas, gap_notes, venue_summary,
                                  facts, literature, gap_evidence_summary)
     evidence_batch = validate_evidence_batch(ideas, literature, llm, facts)
@@ -1274,6 +1345,7 @@ def run(dossier: Dossier, llm: LLMProvider) -> None:
             llm_out=eval_batch.get(idea_id) if eval_batch else None,
             ev_validation=evidence_batch.get(idea_id) if evidence_batch else None,
             gap_evidence_levels=gap_evidence_levels,
+            contribution_out=contribution_batch.get(idea_id) if contribution_batch else None,
         )
 
     # M16 方向⑥：多个 idea 的评估并行执行（结果保持 idea 顺序）。
