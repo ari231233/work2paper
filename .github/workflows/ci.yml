@@ -17,7 +17,7 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - name: 安装依赖
-        run: pip install -e ".[dev]"
+        run: pip install -e ".[dev,web]"
       - name: 冒烟测试
         run: python -m papermine examples/sample-project
       - name: 全量测试

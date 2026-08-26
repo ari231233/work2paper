@@ -11,6 +11,8 @@ report.json
 # Python
 __pycache__/
 *.py[cod]
+# 本地沙箱安装的 Web 依赖（fastapi/uvicorn，不进仓库；正式安装走 .[web]）
+.deps/
 *.egg-info/
 .eggs/
 build/

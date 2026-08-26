@@ -21,9 +21,11 @@ classifiers = [
 
 [project.optional-dependencies]
 dev = ["pytest>=7.0"]
+# Web 外壳（M24/M25）：FastAPI + uvicorn 作为可选依赖，核心依赖仍只有 httpx（架构 §15「核心引擎 + 多外壳」）。
+web = ["fastapi>=0.100", "uvicorn>=0.23"]
 
 [project.scripts]
 papermine = "papermine.cli:main"
 
 [tool.setuptools.packages.find]
-include = ["papermine*"]
+include = ["papermine*", "web*"]
