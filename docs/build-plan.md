@@ -520,6 +520,50 @@ def run(dossier: Dossier, llm: LLMProvider) -> None
 
 - **验收**：对 sample 项目，路线图包含上述 7 部分；一个学生读完能直接开始写代码、且知道"哪些不做也能发"。
 
+### M23 — 报告重构：两层报告（Decision Report + Evidence Appendix）【第一优先】
+
+- **目标**：把报告从「Agent 内部推理的人类可读版」改为「导师给学生的研究建议书」——**两层报告**：默认看到精简的 Decision Report（约当前 25~35% 信息量），完整证据放 Appendix。核心原则：**默认给结论，细节藏附录**。
+- **前置**：M9 / M9 v2（报告渲染）+ M22（路线图 7 部分）。
+
+**两层结构：**
+
+**Layer 1 — Decision Report（默认，精简）：**
+
+```
+# Papermine Research Report
+0. Executive Summary    （推荐 idea + 推荐理由 + 主要风险 + 下一步动作）
+1. Project Understanding（项目叙事 + 研究目标）
+2. Research Questions    （3 个核心问题）
+3. Literature Landscape  （关键论文 + 主要方向 + 证据覆盖度）
+4. Candidate Ideas       （候选 idea 排名表）
+5. Recommended Idea      （创新点 + 贡献类型 + innovation boundary + 风险 + 证据强度）
+6. Paper Roadmap         （Paper Story / RQ / Method / Experiment Matrix / Baselines / Metrics / Success Criteria / Risk & Fallback / MVP / Timeline）
+7. Immediate Next Actions（3 条）
+```
+
+**Layer 2 — Evidence Appendix（完整证据，后置）：**
+
+```
+A. Literature Evidence   （完整文献检索 + 证据卡）
+B. Gap Mining            （gap 表格，展开才显示完整依据）
+C. Hypotheses
+D. Full Novelty Evaluation（Q1/Q2/Q3/Q4 完整评分过程）
+E. Attack Tests
+F. Human Decisions
+```
+
+**7 条具体改动：**
+
+1. **两层报告**：Decision（默认）→ Appendix（后置）。
+2. **Executive Summary 最前**：推荐方向 + 推荐程度（★）+ 论文类型 + 工作量 + 证据强度 + 主要风险 + 「为什么推荐」+「当前最重要的 3 个动作」。
+3. **候选 idea 先排名表**：`Idea | 类型 | Novelty | Evidence | Feasibility | 推荐`，不逐个铺全文；「点击/继续阅读 iN 详细证据」才展开。
+4. **贡献矩阵可视化**：正文只留进度条（如 `Framework █████ 高`），Q1/Q2/Q3/Q4 完整评分放 Appendix。
+5. **Attack Test 改为「主要风险 / Reviewer Risk」**：`风险 → 原因 → 如何加强 → 关键实验`，表达更自然（本质还是 Attack Test）。
+6. **Gap 压成表格**：`Gap | 研究空白假设 | Evidence | Coverage`（如 `g1 | AD 与 RUL 协同机制未充分研究 | Weak | 2 papers`），展开才显示完整依据。
+7. **最终报告结构**按上述 Layer 1 + Layer 2。
+
+- **验收**：报告默认是精简的 Decision Report（长度 ≈ 当前 25~35%），完整证据在 Appendix；一个学生能 2 分钟内看完 Decision Report，并明确知道「推荐哪个、为什么、下一步做什么」。
+
 ---
 
 ## 5. 全部完成后的集成收尾（一个框或本框）
