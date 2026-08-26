@@ -742,8 +742,14 @@ def _render_report_md(dossier: Dossier) -> str:
             lines.append("- **{}**：novelty={}，数据可得性={}，工作量≈{}h，verdict={}".format(
                 ev.get("idea_ref"), novelty_disp, ev.get("data_feasibility"),
                 ev.get("workload_hours"), ev.get("verdict")))
+            cal_lines = evaluate.render_calibration_lines(ev)
             dims = ev.get("novelty_dimensions")
-            if isinstance(dims, dict) and dims:
+            if cal_lines:
+                # M20：评分校准——展示「问题 → 答案 → 规则 → 得分」完整链路（分数可追溯）
+                lines.append("  - 评分校准（问题 → 答案 → 规则 → 得分，分数由规则算出）：")
+                lines.extend(cal_lines)
+            elif isinstance(dims, dict) and dims:
+                # 旧格式评估（无 calibration）：仅展示分维度汇总
                 lines.append("  - 分维度明细（各 0~5，加权合成 novelty 总分）：")
                 for key, label, weight in evaluate.NOVELTY_DIMENSIONS:
                     item = dims.get(key)

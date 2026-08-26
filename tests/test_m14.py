@@ -18,6 +18,7 @@ from pathlib import Path
 from unittest import mock
 
 from papermine import literature, orchestrator, storage, trace
+from papermine.agents.evaluate import RUBRIC
 from papermine.dossier import Dossier
 from papermine.llm import NullProvider
 
@@ -253,6 +254,26 @@ class DataGapNoAutoRollbackTest(unittest.TestCase):
 # 方向②：证据弱 → 自动窄回炉一次（有界）
 # ---------------------------------------------------------------------------
 
+# M20 后 evaluate 的 LLM 契约改为「rubric 答题 + 规则算分」；此处给高分答案（加分项 yes、
+# 封顶项 no），使 novelty 高 → 弱证据仍触发 rework（而非 drop），保持「高 novelty 也被回炉」的测试意图。
+_CAP_QUESTION_IDS = {
+    "problem_novelty": {"Q1"},
+    "method_novelty": {"Q1"},
+    "gap": {"Q3"},
+    "generalization": {"Q3"},
+}
+
+
+def _high_rubric_answers():
+    answers = {}
+    for key, _label, _weight, _base, questions in RUBRIC:
+        answers[key] = {}
+        for (qid, _text, _kind, _value) in questions:
+            answer = "no" if qid in _CAP_QUESTION_IDS.get(key, set()) else "yes"
+            answers[key][qid] = {"answer": answer, "evidence": "证据：测试桩"}
+    return answers
+
+
 class _WeakEvidenceLLM:
     """按 schema 区分调用：评估给高 novelty + 证据弱 → verdict=rework；其余返回空 dict 走确定性降级。"""
 
@@ -269,15 +290,9 @@ class _WeakEvidenceLLM:
                     "claim_strength": {"status": "missing", "note": "claim 过强"},
                 },
             }
-        if "novelty_dimensions" in props:
+        if "rubric" in props:
             return {
-                "novelty_dimensions": {
-                    "problem_novelty": {"score": 5, "reason": "新问题"},
-                    "method_novelty": {"score": 5, "reason": "新机制"},
-                    "technical_depth": {"score": 5, "reason": "突破"},
-                    "gap": {"score": 5, "reason": "与 SOTA 差异明确"},
-                    "generalization": {"score": 5, "reason": "可推广"},
-                },
+                "rubric": _high_rubric_answers(),
                 "workload_hours": 40,
                 "verdict_suggestion": "proceed",
                 "rework_reason": None,

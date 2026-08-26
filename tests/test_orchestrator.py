@@ -368,6 +368,61 @@ class RenderReportNoveltyDimensionsTest(unittest.TestCase):
         self.assertNotIn("分维度明细", md)
 
 
+class RenderReportCalibrationTest(unittest.TestCase):
+    """M20：报告渲染「问题 → 答案 → 规则 → 得分」完整链路（分数可追溯）。"""
+
+    def _dossier(self) -> Dossier:
+        d = Dossier()
+        d.meta["run_id"] = "run_test"
+        d.meta["llm_backend"] = "null"
+        return d
+
+    def test_render_calibration_chain(self):
+        d = self._dossier()
+        d.evaluations = [{
+            "idea_ref": "i1",
+            "novelty_score": 63.0,
+            "novelty_band": "Revise",
+            "novelty_dimensions": {
+                "problem_novelty": {"score": 4, "reason": "规则计算：起点 2 + Q2:+1 + Q3:+1 = 4"},
+                "method_novelty": {"score": 3, "reason": "规则计算：起点 2 + Q3:+1 = 3"},
+                "technical_depth": {"score": 2, "reason": "规则计算：起点 1 + Q1:+1 = 2"},
+                "gap": {"score": 2, "reason": "规则计算：起点 1 + Q1:+1 = 2"},
+                "generalization": {"score": 1, "reason": "规则计算：起点 1 = 1"},
+            },
+            "calibration": {
+                "method_novelty": {
+                    "label": "方法新颖性", "weight": 35, "score": 3,
+                    "base": 2.0, "derivation": "起点 2 + Q3:+1 = 3",
+                    "questions": [
+                        {"id": "Q1", "text": "是否只是已有模块组合？", "answer": "no",
+                         "rule": "yes → 封顶 ≤ 3", "effect": "—", "evidence": "证据：非组合"},
+                        {"id": "Q2", "text": "是否改变核心 optimization objective？", "answer": "no",
+                         "rule": "yes → +1", "effect": "—", "evidence": "证据：无"},
+                        {"id": "Q3", "text": "是否提出新的学习机制？", "answer": "yes",
+                         "rule": "yes → +1", "effect": "+1", "evidence": "证据：自适应机制"},
+                    ],
+                },
+            },
+            "data_feasibility": "high",
+            "workload_hours": 60,
+            "venue_guess": "CCF-B",
+            "verdict": "rework",
+            "rework_reason": "新颖性偏低",
+            "evidence": [],
+        }]
+        md = orchestrator._render_report_md(d)
+        self.assertIn("## 可行性评估", md)
+        self.assertIn("评分校准", md)
+        self.assertIn("问题 → 答案 → 规则 → 得分", md)
+        self.assertIn("方法新颖性（权重35）", md)
+        self.assertIn("是否只是已有模块组合？", md)
+        self.assertIn("yes → 封顶 ≤ 3", md)
+        self.assertIn("证据：自适应机制", md)
+        # 有 calibration 时不再重复渲染「分维度明细」旧块
+        self.assertNotIn("分维度明细", md)
+
+
 class RenderReportM9V2Test(unittest.TestCase):
     """M9 v2：报告渲染 M5 v2 新字段（文献理解 / 矛盾图 / 假设 + idea 关联可追溯）。"""
 
