@@ -12,17 +12,24 @@
 ``additionalProperties: true``），**不改 Dossier 顶层字段、不改冻结接口**（§3.2 / §3.3）。
 
 - 每篇论文新增 ``understanding``：{claim / method / conclusion / applicability / limitations}。
+- 每篇论文新增 ``evidence_card``（M19 论文级证据卡）：{title / dataset / baseline / metric /
+  main_gain / limitation / claim_strength / evidence_source}。**字段提取不到一律标 null，
+  禁止 LLM 编造**（否则 novelty 会漂）；``evidence_source`` ∈ {abstract, fulltext, table}
+  由系统按论文实际可用的证据层级确定性回填（当前检索只给摘要 → 恒为 abstract，fulltext /
+  table 需后续「全文下载 + 表格解析」另立项）。
 - 每条 literature 新增 ``contradiction_graph``：{nodes / edges / gaps}，其中 gaps 的
   ``type`` ∈ {contradiction, gap}，矛盾（contradiction）同时给出节点间 contradiction 边。
 - 每条 literature 新增 ``hypotheses``：每条 gap 对应一条可证伪假设（if-then + falsification）。
 
 降级路径（architecture §7 / §8）：无 LLM（NullProvider）、LLMError、SchemaError、或 LLM
-返回结构非法时，退化为确定性规则（词面级 understanding / 每条目一条 gap / 每条 gap 一条
+返回结构非法时，退化为确定性规则（词面级 understanding / 证据卡只做保守关键词抽取且
+baseline·gain·limitation·claim_strength 一律 null / 每条目一条 gap / 每条 gap 一条
 if-then 假设），保证六步流水线在离线/异常下也能产出可追溯的 gap → hypothesis → idea 链。
 """
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, Dict, List, Optional, Tuple
 
 from .llm import LLMError, LLMProvider, SchemaError
@@ -33,11 +40,19 @@ __all__ = [
     "BATCH_UNDERSTANDING_SCHEMA",
     "MINING_SCHEMA",
     "HYPOTHESIS_SCHEMA",
+    "EVIDENCE_CARD_SCHEMA",
+    "BATCH_EVIDENCE_CARD_SCHEMA",
+    "EVIDENCE_SOURCES",
     "MAX_UNDERSTAND_PAPERS",
     "MAX_GAPS",
     "_understand_deterministic",
     "_mine_deterministic",
     "_hypothesize_deterministic",
+    "_evidence_source_for",
+    "_evidence_card_deterministic",
+    "_sanitize_evidence_card",
+    "_extract_evidence_cards_with_llm",
+    "_extract_evidence_entry",
     "_build_graph",
     "_assign_gap_ids",
     "_entry_gaps",
@@ -48,6 +63,15 @@ __all__ = [
 MAX_UNDERSTAND_PAPERS = 8
 # 每条文献条目最多保留的 gap/矛盾数量（防止图无限膨胀）
 MAX_GAPS = 8
+
+# 论文级证据卡的证据来源层级（docs/build-plan.md §4 M19）：abstract=弱证据，fulltext/table=强证据
+EVIDENCE_SOURCES: Tuple[str, ...] = ("abstract", "fulltext", "table")
+# 证据卡 claim_strength 的取值：strong=绝对化/全称断言，moderate=有对比的改进主张，weak=探索性/受限主张
+_CLAIM_STRENGTHS: Tuple[str, ...] = ("strong", "moderate", "weak")
+# 证据卡中由 LLM 从摘要提取的可空字段（缺失一律 null，绝不编造）；title / evidence_source 由系统确定性回填
+_EVIDENCE_FIELDS: Tuple[str, ...] = (
+    "dataset", "baseline", "metric", "main_gain", "limitation", "claim_strength",
+)
 
 # ---------------------------------------------------------------------------
 # 结构化输出契约（schema 校验走 papermine/llm.py 的极简子集）
@@ -82,6 +106,52 @@ BATCH_UNDERSTANDING_SCHEMA: Dict[str, Any] = {
                 "properties": {
                     "title": {"type": "string"},
                     "understanding": _UNDERSTANDING_OBJECT,
+                },
+            },
+        },
+    },
+}
+
+# 论文级证据卡（docs/build-plan.md §4 M19）：每篇论文固定 8 字段。
+# title / evidence_source 由系统确定性回填（title 取论文真实标题、evidence_source 按可用证据层级）；
+# 其余 6 字段由 LLM 从摘要提取，提取不到一律 null，绝不编造（否则 novelty 会漂）。
+EVIDENCE_CARD_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": [
+        "title", "dataset", "baseline", "metric",
+        "main_gain", "limitation", "claim_strength", "evidence_source",
+    ],
+    "properties": {
+        "title": {"type": "string"},
+        "dataset": {"type": ["string", "null"]},
+        "baseline": {"type": ["string", "null"]},
+        "metric": {"type": ["string", "null"]},
+        "main_gain": {"type": ["string", "null"]},
+        "limitation": {"type": ["string", "null"]},
+        "claim_strength": {
+            "type": ["string", "null"],
+            "enum": list(_CLAIM_STRENGTHS) + [None],
+        },
+        "evidence_source": {"type": "string", "enum": list(EVIDENCE_SOURCES)},
+    },
+}
+
+# 批量证据卡提取：一次 LLM 调用返回该条目下多篇论文的证据卡
+BATCH_EVIDENCE_CARD_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["papers"],
+    "properties": {
+        "papers": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["title", "evidence_card"],
+                "properties": {
+                    "title": {"type": "string"},
+                    "evidence_card": EVIDENCE_CARD_SCHEMA,
                 },
             },
         },
@@ -162,6 +232,23 @@ _UNDERSTAND_SYSTEM = (
     "不要增删改；understanding 为五字段对象。只输出 JSON，严格满足给定 schema。"
 )
 
+_EVIDENCE_SYSTEM = (
+    "你是 papermine 的「论文级证据卡提取器」。给定检索命中的论文（仅标题/摘要），"
+    "为每篇论文提取一张证据卡，作为 novelty 判断的证据基础。\n"
+    "字段说明（除 title / evidence_source 外均可空）：\n"
+    "1. dataset：论文实验使用的数据集/基准名（如 C-MAPSS、ImageNet）；摘要未明确提及 → null；\n"
+    "2. baseline：论文对比的基线方法（如 LSTM、SVM）；摘要未明确提及 → null；\n"
+    "3. metric：论文使用的评测指标（如 RMSE、accuracy、F1）；摘要未明确提及 → null；\n"
+    "4. main_gain：论文声称的主要提升/收益（如「精度相对基线提升 5%」）；摘要未明确给出 → null；\n"
+    "5. limitation：论文自述或可见的局限/边界；摘要未提及 → null；\n"
+    "6. claim_strength：论文主张强度，只能取 strong（绝对化/全称断言，如「首次」「最优」「state-of-the-art」）、"
+    "moderate（有对比的改进主张）、weak（探索性/受限主张）；无法判断 → null；\n"
+    "7. evidence_source：一律填 abstract（当前检索仅提供摘要；系统会据实回填，本字段仅供占位）。\n"
+    "铁律：只提取给定文本中【明确出现】的信息；任何未明确出现的字段一律填 null，"
+    "绝不根据常识或领域背景补全、绝不编造 baseline / gain。title 必须逐字等于给定论文标题。"
+    "只输出 JSON，严格满足给定 schema。"
+)
+
 _MINING_SYSTEM = (
     "你是 papermine 的「矛盾与缺口挖掘器」。给定同一检索查询命中的多篇论文及其结构化理解，"
     "跨论文比较以找出可成为创新点的矛盾与缺口。\n"
@@ -206,6 +293,18 @@ _METHOD_KEYWORDS: Tuple[Tuple[str, str], ...] = (
     ("remaining useful life", "剩余寿命预测"),
     ("prognostics", "寿命预测"),
     ("time series", "时序建模"),
+)
+
+# 证据卡确定性降级用的保守词典（词首边界匹配，宁可漏提不可误提）：
+# 仅收录可无歧义识别的数据集名 / 评测指标；baseline / main_gain / limitation / claim_strength
+# 不在此列（无 LLM 时无法可靠提取，一律 null，绝不编造）。
+_DATASET_TERMS: Tuple[str, ...] = (
+    "C-MAPSS", "Turbofan", "PHM", "MNIST", "Fashion-MNIST",
+    "CIFAR-10", "CIFAR-100", "ImageNet", "COCO", "SQuAD", "LibriSpeech",
+)
+_METRIC_TERMS: Tuple[str, ...] = (
+    "RMSE", "MAE", "MAPE", "MSE", "accuracy", "F1", "AUC", "AUROC",
+    "precision", "recall", "R-squared", "R2",
 )
 
 
@@ -312,6 +411,134 @@ def _understand_entry(entry: Dict[str, Any], papers: List[Dict[str, Any]],
         title = _paper_title(paper)
         u = (understood or {}).get(title) if title else None
         paper["understanding"] = u if _valid_understanding(u) else _understand_deterministic(paper)
+
+
+# ---------------------------------------------------------------------------
+# ①½ 论文级证据卡（M19）：LLM 提取 + 确定性降级，字段缺失一律 null，绝不编造
+# ---------------------------------------------------------------------------
+
+def _nullable(s: Any) -> Optional[str]:
+    """把任意值折叠为单行文本；空/None/纯空白 → None（证据卡「未提取」的规范表示）。"""
+    return _clean(s) or None
+
+
+def _evidence_source_for(paper: Dict[str, Any]) -> str:
+    """按论文实际可用的证据层级确定性回填 evidence_source。
+
+    层级（docs/build-plan.md §4 M19）：table（已解析表格，最强）> fulltext（全文，强）>
+    abstract（仅摘要，弱）。当前检索（arXiv + Semantic Scholar）只给摘要，故 v1 恒为
+    abstract；fulltext / table 需后续「全文下载 + 表格解析」另立项后才会命中。
+    """
+    if not isinstance(paper, dict):
+        return "abstract"
+    tables = paper.get("tables")
+    if isinstance(tables, (list, tuple)) and len(tables) > 0:
+        return "table"
+    if _clean(paper.get("fulltext")):
+        return "fulltext"
+    return "abstract"
+
+
+def _match_terms(text: str, terms: Tuple[str, ...]) -> List[str]:
+    """保守的词首边界匹配（忽略大小写），返回命中的术语；宁缺毋滥。"""
+    out: List[str] = []
+    for t in terms:
+        if re.search(r"\b" + re.escape(t) + r"\b", text, re.IGNORECASE):
+            out.append(t)
+    return out
+
+
+def _join_or_none(items: List[str]) -> Optional[str]:
+    """列表非空 → 「、」连接字符串；空 → None。"""
+    return "、".join(items) if items else None
+
+
+def _evidence_card_deterministic(paper: Dict[str, Any]) -> Dict[str, Any]:
+    """无 LLM 时的证据卡确定性降级：仅做保守的 dataset/metric 关键词抽取，其余字段一律 null。
+
+    baseline / main_gain / limitation / claim_strength 无法用词面规则可靠提取，按 M19 铁律
+    标 null（**不编造**）；dataset / metric 只在命中明确词典术语时取值，否则也 null。
+    """
+    title = _paper_title(paper)
+    text = (title + " " + _clean(paper.get("abstract"))).lower()
+    return {
+        "title": title,
+        "dataset": _join_or_none(_match_terms(text, _DATASET_TERMS)),
+        "baseline": None,
+        "metric": _join_or_none(_match_terms(text, _METRIC_TERMS)),
+        "main_gain": None,
+        "limitation": None,
+        "claim_strength": None,
+        "evidence_source": _evidence_source_for(paper),
+    }
+
+
+def _sanitize_evidence_card(raw: Any, title: str, paper: Dict[str, Any]) -> Dict[str, Any]:
+    """把 LLM 原始证据卡规范化为最终 8 字段卡；任何非法输入退化为确定性降级。
+
+    - ``title`` 恒取论文真实标题（杜绝标题编造）；
+    - ``evidence_source`` 恒由 ``_evidence_source_for`` 确定性回填（杜绝来源虚标）；
+    - 6 个可空字段：非字符串 / 空串 → null；claim_strength 非法枚举 → null。
+    """
+    if not isinstance(raw, dict):
+        return _evidence_card_deterministic(paper)
+    card: Dict[str, Any] = {"title": title}
+    for field in _EVIDENCE_FIELDS:
+        val = raw.get(field)
+        if field == "claim_strength":
+            card[field] = val if val in _CLAIM_STRENGTHS else None
+        else:
+            card[field] = _nullable(val)
+    card["evidence_source"] = _evidence_source_for(paper)
+    return card
+
+
+def _extract_evidence_cards_with_llm(entry: Dict[str, Any], papers: List[Dict[str, Any]],
+                                     llm: Optional[LLMProvider]) -> Optional[Dict[str, Dict[str, Any]]]:
+    """LLM 批量提取证据卡，返回 {论文标题: 原始证据卡}；失败/无 LLM/结构非法返回 None。"""
+    if llm is None or not papers:
+        return None
+    subset = papers[:MAX_UNDERSTAND_PAPERS]
+    user = json.dumps({
+        "query": entry.get("query", ""),
+        "papers": [
+            {
+                "title": _paper_title(p),
+                "abstract": _clip(p.get("abstract"), 500),
+                "venue": p.get("venue", ""),
+                "year": p.get("year"),
+            }
+            for p in subset
+        ],
+    }, ensure_ascii=False)
+    try:
+        result = llm.complete(_EVIDENCE_SYSTEM, user, BATCH_EVIDENCE_CARD_SCHEMA, temperature=0.1)
+    except (LLMError, SchemaError):
+        return None
+    if not isinstance(result, dict):
+        return None
+    raw = result.get("papers")
+    if not isinstance(raw, list):
+        return None
+    out: Dict[str, Dict[str, Any]] = {}
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        title = _clean(item.get("title"))
+        card = item.get("evidence_card")
+        if title and isinstance(card, dict):
+            out[title] = card
+    return out
+
+
+def _extract_evidence_entry(entry: Dict[str, Any], papers: List[Dict[str, Any]],
+                            llm: Optional[LLMProvider]) -> None:
+    """对条目内所有论文写入 evidence_card（LLM 命中用 LLM，未命中/失败走确定性降级）。"""
+    cards = _extract_evidence_cards_with_llm(entry, papers, llm)
+    for paper in papers:
+        title = _paper_title(paper)
+        raw = (cards or {}).get(title) if title else None
+        paper["evidence_card"] = _sanitize_evidence_card(raw, title, paper)
 
 
 # ---------------------------------------------------------------------------
@@ -546,16 +773,18 @@ def _entry_hypotheses(entry: Dict[str, Any]) -> List[Dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 def analyze_literature(literature: List[dict], llm: LLMProvider) -> List[dict]:
-    """对每条 literature 条目依次执行 理解 → 矛盾/gap 挖掘 → 假设生成，原地丰富并返回。
+    """对每条 literature 条目依次执行 理解 → 证据卡(M19) → 矛盾/gap 挖掘 → 假设生成，原地丰富并返回。
 
     - 每篇论文写 ``understanding``；
+    - 每篇论文写 ``evidence_card``（M19 论文级证据卡，8 字段；提取不到一律 null，绝不编造，
+      ``evidence_source`` 确定性回填）；
     - 每条目写 ``contradiction_graph``（nodes/edges/gaps，gaps 的 type ∈ {gap, contradiction}）；
     - 每条目写 ``hypotheses``（每条 gap 一条 if-then 可证伪假设）；
     - gap_id / hypothesis_id 全局唯一（跨条目不重号），供 idea 追溯引用。
 
     无 LLM / 异常时退化为确定性规则，绝不抛异常。
 
-    M16 方向⑥：①理解 + ②挖掘（跨条目独立）与③假设生成（跨条目独立）**并行执行**；
+    M16 方向⑥：①理解 + ①½证据卡 + ②挖掘（跨条目独立）与③假设生成（跨条目独立）**并行执行**；
     赋全局唯一 gap_id / hypothesis_id 的两步为顺序（纯确定性、无网络 I/O），保证编号
     严格按「条目序 + 条目内序」可复现。
     """
@@ -563,12 +792,13 @@ def analyze_literature(literature: List[dict], llm: LLMProvider) -> List[dict]:
     if not entries:
         return literature
 
-    # ① 文献理解 + ② 矛盾/gap 挖掘：跨条目不共享状态 → 并行。
+    # ① 文献理解 + ①½ 论文级证据卡（M19）+ ② 矛盾/gap 挖掘：跨条目不共享状态 → 并行。
     def _understand_and_mine(entry: Dict[str, Any]) -> Tuple[List[Dict[str, Any]],
                                                               List[Dict[str, str]],
                                                               List[Dict[str, str]]]:
         papers = [p for p in (entry.get("papers") or []) if isinstance(p, dict)]
         _understand_entry(entry, papers, llm)
+        _extract_evidence_entry(entry, papers, llm)
         gaps, conts = _mine_with_llm(entry, papers, llm)
         if gaps is None or conts is None:
             gaps, conts = _mine_deterministic(entry, papers)

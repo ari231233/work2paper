@@ -12,9 +12,12 @@ import unittest
 from papermine import literature
 from papermine.llm import LLMError, NullProvider
 from papermine.literature import (
+    BATCH_EVIDENCE_CARD_SCHEMA,
     BATCH_UNDERSTANDING_SCHEMA,
+    EVIDENCE_CARD_SCHEMA,
     HYPOTHESIS_SCHEMA,
     MINING_SCHEMA,
+    _evidence_source_for,
     analyze_literature,
 )
 
@@ -184,6 +187,146 @@ class AnalyzeLiteratureLLMTest(unittest.TestCase):
         graph = lit[0]["contradiction_graph"]
         self.assertEqual(graph["edges"], [])
         self.assertEqual([g for g in graph["gaps"] if g["type"] == "contradiction"], [])
+
+
+class PaperEvidenceCardTest(unittest.TestCase):
+    """M19：论文级证据卡——字段要么有值要么 null，evidence_source 正确，无编造的 baseline/gain。"""
+
+    def test_offline_every_paper_gets_8_field_card(self):
+        lit = [_entry([_paper("LSTM RUL Prediction"), _paper("Isolation Forest Anomaly Detection")])]
+        analyze_literature(lit, NullProvider())
+        for p in lit[0]["papers"]:
+            card = p["evidence_card"]
+            self.assertEqual(
+                sorted(card.keys()),
+                sorted(["title", "dataset", "baseline", "metric",
+                        "main_gain", "limitation", "claim_strength", "evidence_source"]),
+            )
+            self.assertEqual(card["title"], p["title"])       # title 恒取真实标题
+            self.assertEqual(card["evidence_source"], "abstract")  # v1 仅摘要
+            # 无 LLM：baseline/main_gain/limitation/claim_strength 一律 null（绝不编造）
+            self.assertIsNone(card["baseline"])
+            self.assertIsNone(card["main_gain"])
+            self.assertIsNone(card["limitation"])
+            self.assertIsNone(card["claim_strength"])
+            # dataset/metric：要么 None 要么命中保守词典
+            self.assertTrue(card["dataset"] is None or isinstance(card["dataset"], str))
+            self.assertTrue(card["metric"] is None or isinstance(card["metric"], str))
+
+    def test_offline_no_fabricated_baseline_gain(self):
+        # 摘要明确出现基线/方法词（SVM/LSTM），但确定性降级仍不得编造 baseline/main_gain
+        abstract = "We compare LSTM against SVM and report a large improvement."
+        lit = [_entry([_paper("LSTM vs SVM", abstract=abstract)])]
+        analyze_literature(lit, NullProvider())
+        card = lit[0]["papers"][0]["evidence_card"]
+        self.assertIsNone(card["baseline"])
+        self.assertIsNone(card["main_gain"])
+
+    def test_offline_extracts_dataset_and_metric_conservatively(self):
+        abstract = "We evaluate on the C-MAPSS dataset and report RMSE and accuracy."
+        lit = [_entry([_paper("RUL Model", abstract=abstract)])]
+        analyze_literature(lit, NullProvider())
+        card = lit[0]["papers"][0]["evidence_card"]
+        self.assertIn("C-MAPSS", card["dataset"])
+        self.assertIn("RMSE", card["metric"])
+        self.assertIn("accuracy", card["metric"])
+
+    def test_evidence_source_for_levels(self):
+        self.assertEqual(_evidence_source_for({}), "abstract")
+        self.assertEqual(_evidence_source_for({"fulltext": "全文……"}), "fulltext")
+        self.assertEqual(_evidence_source_for({"tables": [{"x": 1}]}), "table")
+        # table 优先于 fulltext（表格是最强的证据层级）
+        self.assertEqual(_evidence_source_for({"fulltext": "x", "tables": [{}]}), "table")
+
+    def test_llm_evidence_card_extracted_and_source_overridden(self):
+        def handler(system, user, schema, temperature=0.2):
+            if schema is BATCH_EVIDENCE_CARD_SCHEMA:
+                return {"papers": [{
+                    "title": "LSTM RUL Prediction",
+                    "evidence_card": {
+                        "title": "LSTM RUL Prediction",
+                        "dataset": "C-MAPSS",
+                        "baseline": "SVM",
+                        "metric": "RMSE",
+                        "main_gain": "RMSE 相对基线降低 10%",
+                        "limitation": None,
+                        "claim_strength": "moderate",
+                        # LLM 乱填来源层级，应被系统按论文真实证据覆盖为 abstract
+                        "evidence_source": "fulltext",
+                    },
+                }]}
+            return {}
+        lit = [_entry([_paper("LSTM RUL Prediction", abstract="x")])]
+        analyze_literature(lit, _StubLLM(handler=handler))
+        card = lit[0]["papers"][0]["evidence_card"]
+        self.assertEqual(card["title"], "LSTM RUL Prediction")
+        self.assertEqual(card["dataset"], "C-MAPSS")
+        self.assertEqual(card["baseline"], "SVM")
+        self.assertEqual(card["metric"], "RMSE")
+        self.assertEqual(card["main_gain"], "RMSE 相对基线降低 10%")
+        self.assertIsNone(card["limitation"])
+        self.assertEqual(card["claim_strength"], "moderate")
+        self.assertEqual(card["evidence_source"], "abstract")
+
+    def test_llm_null_fields_preserved_and_invalid_claim_strength_nulled(self):
+        def handler(system, user, schema, temperature=0.2):
+            if schema is BATCH_EVIDENCE_CARD_SCHEMA:
+                return {"papers": [{
+                    "title": "Paper A",
+                    "evidence_card": {
+                        "title": "Paper A",
+                        "dataset": None,
+                        "baseline": None,
+                        "metric": None,
+                        "main_gain": None,
+                        "limitation": None,
+                        "claim_strength": "超强",  # 非法枚举 → null
+                        "evidence_source": "abstract",
+                    },
+                }]}
+            return {}
+        lit = [_entry([_paper("Paper A")])]
+        analyze_literature(lit, _StubLLM(handler=handler))
+        card = lit[0]["papers"][0]["evidence_card"]
+        self.assertIsNone(card["dataset"])
+        self.assertIsNone(card["baseline"])
+        self.assertIsNone(card["metric"])
+        self.assertIsNone(card["main_gain"])
+        self.assertIsNone(card["limitation"])
+        self.assertIsNone(card["claim_strength"])
+        self.assertEqual(card["evidence_source"], "abstract")
+
+    def test_llm_card_title_must_match_real_paper(self):
+        # LLM 返回的标题与真实论文不一致时，该证据卡被丢弃 → 走确定性降级（title 仍取真实标题）
+        def handler(system, user, schema, temperature=0.2):
+            if schema is BATCH_EVIDENCE_CARD_SCHEMA:
+                return {"papers": [{
+                    "title": "Fake Title",
+                    "evidence_card": {
+                        "title": "Fake Title", "dataset": "MNIST", "baseline": "X",
+                        "metric": "accuracy", "main_gain": "提升", "limitation": None,
+                        "claim_strength": "strong", "evidence_source": "abstract",
+                    },
+                }]}
+            return {}
+        lit = [_entry([_paper("Real Paper")])]
+        analyze_literature(lit, _StubLLM(handler=handler))
+        card = lit[0]["papers"][0]["evidence_card"]
+        self.assertEqual(card["title"], "Real Paper")   # 恒取真实标题
+        self.assertEqual(card["evidence_source"], "abstract")
+        self.assertIsNone(card["baseline"])             # 幻觉标题的卡片被丢弃 → 确定性降级
+        self.assertIsNone(card["main_gain"])
+
+    def test_evidence_card_schema_contract(self):
+        self.assertEqual(EVIDENCE_CARD_SCHEMA["type"], "object")
+        self.assertEqual(sorted(EVIDENCE_CARD_SCHEMA["required"]), sorted([
+            "title", "dataset", "baseline", "metric",
+            "main_gain", "limitation", "claim_strength", "evidence_source",
+        ]))
+        self.assertEqual(
+            EVIDENCE_CARD_SCHEMA["properties"]["evidence_source"]["enum"],
+            ["abstract", "fulltext", "table"],
+        )
 
 
 class _ConcurrentStubLLM:
