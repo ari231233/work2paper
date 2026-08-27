@@ -4,6 +4,17 @@
 
 ## [Unreleased]
 
+### Added
+- M26 Web 本地分发：新增 `papermine web`，统一启动/关闭 FastAPI 与 Next.js，支持自定义端口、开发模式和自动打开浏览器
+- M26 同源 API 代理：前端统一请求 `/api`，运行时代理到本地 FastAPI，避免构建时固化后端端口
+- M27 Web 项目导入：支持选择项目文件夹或上传 ZIP，导入预览确认后再启动分析
+- M27 导入安全层：ZIP Slip / 符号链接 / ZIP Bomb 防护，文件数和大小限制，依赖目录及敏感文件默认排除
+
+### Changed
+- Web 可选依赖新增 `python-multipart`；核心运行依赖仍只有 `httpx`
+- 用户项目先复制到 `~/.papermine/imports/<import_id>/source/`，分析不修改原始目录
+- 测试从 364 增至 374 个
+
 ## [0.3.0]
 
 ### Added

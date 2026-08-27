@@ -737,4 +737,4 @@ F. Human Decisions
 
 ## 6. 已定：HTTP 客户端 = httpx
 
-**HTTP 客户端已定为 httpx**（M1、M5 都用），已加入 `pyproject.toml` 的 `dependencies`。这是本项目首个第三方依赖。后续若需新增依赖，先经本框确认许可。
+**HTTP 客户端已定为 httpx**（M1、M5 都用），已加入 `pyproject.toml` 的核心 `dependencies`。核心引擎仍只有该第三方依赖；FastAPI / uvicorn / python-multipart 属于 Web 可选 extra。后续若需新增依赖，先经本框确认许可。

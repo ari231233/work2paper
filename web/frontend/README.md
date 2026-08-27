@@ -1,5 +1,7 @@
 # PaperMine 科研决策工作台（M25 前端）
 
+普通用户请在仓库根目录使用 `papermine web`，它会统一启动 FastAPI 与 Next.js。以下命令仅用于前端开发。
+
 把 PaperMine 的 `report` 从「阅读器」升级为「科研决策工作台」——左导航 / 状态，中结论 / 分析，
 右证据 / 操作。数据全部来自 M24 的 FastAPI（`web/` 后端），前端**不直接碰 Dossier / Agent**。
 
@@ -9,7 +11,7 @@
 
 ```
 web/frontend/
-├── app/                     # 5 个页面（Overview / Literature / Ideas / Idea Detail / Roadmap）
+├── app/                     # 工作台页面 + M27 项目导入页
 ├── components/
 │   ├── layout/              # 左导航 + 状态 + Ask PaperMine
 │   ├── overview/            # Research Recommendation 大卡片

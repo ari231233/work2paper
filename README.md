@@ -23,7 +23,7 @@
 ## 快速开始
 
 ```bash
-# 安装（含运行时依赖 httpx）
+# 安装核心 CLI（运行时依赖仅 httpx）
 pip install -e .
 
 # 配置 DeepSeek key（可选；不配则走确定性降级）
@@ -40,6 +40,34 @@ python -m papermine resume <run_id>
 
 分析结果写入 `~/.papermine/runs/<run_id>/report.md`。
 
+## 本地 Web 客户端
+
+Web 客户端需要 Python 3.8+ 与 Node.js 18+。首次安装：
+
+```bash
+git clone <repository-url>
+cd papermine
+pip install -e ".[web]"
+
+cd web/frontend
+npm ci
+npm run build
+cd ../..
+
+# 同时启动后端和前端，并自动打开浏览器
+papermine web
+```
+
+常用选项：
+
+```bash
+papermine web --no-browser
+papermine web --api-port 8100 --web-port 3100
+papermine web --dev
+```
+
+默认仅监听 `127.0.0.1`，不会向局域网或公网开放。进入 Web 后点击左侧「新建分析」，可以选择整个项目文件夹或上传 ZIP，在预览确认后创建分析 run。导入过程会把项目复制到 `~/.papermine/imports/`，不会修改用户的原始项目。
+
 ## 输出报告
 
 一份 Markdown 报告，包含：
@@ -53,7 +81,8 @@ python -m papermine resume <run_id>
 
 ```
 papermine/
-  cli.py           命令行入口（analyze / resume / status）
+  cli.py           命令行入口（analyze / resume / status / trace / web）
+  web_launcher.py  本地 Web 双服务统一启动与关闭
   orchestrator.py  编排器（状态机 + 检查点 + 回退）
   dossier.py       研究档案（单项目唯一事实源，版本化）
   llm.py           LLM 抽象（DeepSeek + NullProvider 降级）
@@ -65,6 +94,7 @@ papermine/
   report.py        Markdown 报告渲染
   extractor/       Python AST 静态分析 + 文档读取
 examples/sample-project/   示例横向项目（工业预测性维护）
+web/                       FastAPI API + Next.js 科研决策工作台
 ```
 
 ## 已知边界

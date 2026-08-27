@@ -67,6 +67,10 @@ LLM 系统「改了 prompt / schema / 词典 = 改了行为」，所以版本化
 
 ```
 ~/.papermine/
+├── imports/                       # Web 导入的项目副本
+│   └── <import_id>/
+│       ├── source/                # 安全过滤后的项目副本
+│       └── import.json            # import_record v1 + run_id 关联
 ├── runs/                          # 每次分析一个 run
 │   └── <run_id>/                  # run_id = 时间戳 + 短hash
 │       ├── dossier.json           # 研究档案（append-only，带 version）
@@ -93,6 +97,7 @@ LLM 系统「改了 prompt / schema / 词典 = 改了行为」，所以版本化
 | 数据 | 策略 |
 |---|---|
 | Dossier | append-only，每次状态迁移 `version+1`；`human_decisions` 完整保留 |
+| 导入项目副本 | 与 run 分离；一个 import 可产生多次 run；用户删除前保留在本机 |
 | 经验条目 | candidate →（人工确认 或 `support_count≥阈值`）→ 生效；坏经验 mark `retired`（不物理删，可审计） |
 | 文献缓存 | 带 `source` + `fetched_at` + TTL，过期刷新；命中优先用缓存 |
 | 日志 | 滚动保留 30 天；API 审计日志（上传了什么、脱敏后）单独长期保留 |
