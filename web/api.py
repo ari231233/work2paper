@@ -34,16 +34,22 @@ import os
 import time
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Body, HTTPException, Request
+from fastapi import APIRouter, Body, File, Form, HTTPException, Request, UploadFile
 from papermine import literature, orchestrator, reporting, storage
 from papermine.agents import evaluate
 from papermine.dossier import Dossier
 from papermine.llm import LLMError, SchemaError, get_provider
 from papermine.retrieval import search_literature
+from . import imports as project_imports
 
 router = APIRouter()
 
 __all__ = ["router", "REFINE_SCHEMA"]
+
+
+def _import_error(exc: Exception) -> HTTPException:
+    status = 413 if isinstance(exc, project_imports.ImportLimitError) else 400
+    return HTTPException(status_code=status, detail=str(exc))
 
 
 # ---------------------------------------------------------------------------
@@ -259,6 +265,68 @@ def _history_payload(project_id: str, dossier: Dossier) -> dict:
 @router.get("/health")
 def health() -> dict:
     return {"status": "ok", "service": "papermine-web"}
+
+
+# ---------------------------------------------------------------------------
+# M27 项目导入：预览后显式确认分析
+# ---------------------------------------------------------------------------
+
+@router.post("/imports/folder")
+async def upload_folder(
+    files: List[UploadFile] = File(...),
+    paths: List[str] = Form(...),
+    project_name: Optional[str] = Form(None),
+) -> dict:
+    try:
+        return await project_imports.import_folder(files, paths, project_name)
+    except project_imports.ImportValidationError as exc:
+        raise _import_error(exc) from exc
+
+
+@router.post("/imports/archive")
+async def upload_archive(
+    file: UploadFile = File(...),
+    project_name: Optional[str] = Form(None),
+) -> dict:
+    try:
+        return await project_imports.import_archive(file, project_name)
+    except project_imports.ImportValidationError as exc:
+        raise _import_error(exc) from exc
+
+
+@router.get("/imports/{import_id}")
+def get_import(import_id: str) -> dict:
+    try:
+        return project_imports.load_record(import_id)
+    except (FileNotFoundError, project_imports.ImportValidationError) as exc:
+        raise HTTPException(status_code=404, detail="导入记录不存在：{}".format(import_id)) from exc
+
+
+@router.post("/imports/{import_id}/analyze")
+def analyze_import(import_id: str, body: dict = Body(default={"auto": True})) -> dict:
+    try:
+        record = project_imports.load_record(import_id)
+    except (FileNotFoundError, project_imports.ImportValidationError) as exc:
+        raise HTTPException(status_code=404, detail="导入记录不存在：{}".format(import_id)) from exc
+    if record.get("status") == "analyzing":
+        raise HTTPException(status_code=409, detail="该项目正在分析")
+    source_dir = str(record.get("source_dir") or "")
+    if not source_dir or not os.path.isdir(source_dir):
+        raise HTTPException(status_code=409, detail="导入项目副本不存在，请重新导入")
+    record["status"] = "analyzing"
+    record["run_id"] = None
+    project_imports.save_record(record)
+    try:
+        run_id = orchestrator.run_pipeline(source_dir, auto=bool(body.get("auto", True)))
+        record["status"] = "done"
+        record["run_id"] = run_id
+        project_imports.save_record(record)
+        return {"import": record, "project": _project_payload(run_id)}
+    except Exception as exc:
+        record["status"] = "failed"
+        record["warnings"] = list(record.get("warnings") or []) + ["分析失败：{}".format(exc)]
+        project_imports.save_record(record)
+        raise HTTPException(status_code=500, detail="分析失败：{}".format(exc)) from exc
 
 
 @router.get("/projects")

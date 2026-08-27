@@ -5,6 +5,8 @@ import type {
   EvaluateResponse,
   GapsResponse,
   HistoryResponse,
+  ImportAnalyzeResponse,
+  ImportRecord,
   IdeasResponse,
   LiteratureResponse,
   ProjectPayload,
@@ -14,9 +16,9 @@ import type {
   RoadmapResponse,
 } from "./types";
 
-const BASE_URL = (
-  process.env.NEXT_PUBLIC_API_BASE_URL || "http://127.0.0.1:8000"
-).replace(/\/+$/, "");
+// M26：浏览器统一访问同源 /api，由 Next.js 在运行时代理到 FastAPI。
+// 避免把后端端口烘焙进前端构建产物，也消除本地 CORS/双端口配置负担。
+const BASE_URL = "/api";
 
 export class ApiError extends Error {
   status: number;
@@ -30,9 +32,12 @@ export class ApiError extends Error {
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   let res: Response;
   try {
+    const isForm = typeof FormData !== "undefined" && init?.body instanceof FormData;
     res = await fetch(`${BASE_URL}${path}`, {
       ...init,
-      headers: { "Content-Type": "application/json", ...(init?.headers || {}) },
+      headers: isForm
+        ? init?.headers
+        : { "Content-Type": "application/json", ...(init?.headers || {}) },
     });
   } catch (err) {
     throw new ApiError(0, `无法连接后端（${BASE_URL}）。请先运行 \`python -m web\`。`);
@@ -76,4 +81,24 @@ export const api = {
     request<EvaluateResponse>(`/projects/${id}/ideas/${ideaId}/evaluate`, { method: "POST" }),
   retrieveMore: (id: string, gapId: string) =>
     request<RetrieveMoreResponse>(`/projects/${id}/gaps/${gapId}/retrieve-more`, { method: "POST" }),
+
+  importFolder: (files: File[], paths: string[], projectName?: string) => {
+    const body = new FormData();
+    files.forEach((file) => body.append("files", file, file.name));
+    paths.forEach((path) => body.append("paths", path));
+    if (projectName?.trim()) body.append("project_name", projectName.trim());
+    return request<ImportRecord>("/imports/folder", { method: "POST", body });
+  },
+  importArchive: (file: File, projectName?: string) => {
+    const body = new FormData();
+    body.append("file", file, file.name);
+    if (projectName?.trim()) body.append("project_name", projectName.trim());
+    return request<ImportRecord>("/imports/archive", { method: "POST", body });
+  },
+  getImport: (id: string) => request<ImportRecord>(`/imports/${id}`),
+  analyzeImport: (id: string) =>
+    request<ImportAnalyzeResponse>(`/imports/${id}/analyze`, {
+      method: "POST",
+      body: JSON.stringify({ auto: true }),
+    }),
 };

@@ -429,3 +429,34 @@ export interface RetrieveMoreResponse {
   added_papers?: string[];
   updated_evaluations?: Evaluation[];
 }
+
+// ---------- M27 项目导入 ----------
+
+export type ImportStatus = "ready" | "analyzing" | "done" | "failed";
+
+export interface ExcludedImportFile {
+  path?: string;
+  reason?: "ignored_directory" | "sensitive_file" | string;
+}
+
+export interface ImportRecord {
+  import_id: string;
+  project_id: string;
+  project_name: string;
+  source_type: "folder" | "zip";
+  file_count: number;
+  total_size: number;
+  included_files: string[];
+  excluded_files: ExcludedImportFile[];
+  warnings: string[];
+  status: ImportStatus;
+  source_dir: string;
+  run_id?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ImportAnalyzeResponse {
+  import: ImportRecord;
+  project: ProjectPayload;
+}

@@ -31,6 +31,7 @@ def layout() -> Dict[str, Path]:
     return {
         "root": root,
         "runs": root / "runs",
+        "imports": root / "imports",
         "experience": root / "experience",
         "literature_cache": root / "literature_cache",
         "logs": root / "logs",

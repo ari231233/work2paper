@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { FlaskConical, LayoutDashboard, Lightbulb, Map, ScrollText } from "lucide-react";
+import { FlaskConical, FolderUp, LayoutDashboard, Lightbulb, Map, ScrollText } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 import { PipelineProgress } from "./pipeline-progress";
@@ -30,6 +30,18 @@ export function Sidebar() {
       </div>
 
       <nav className="flex flex-1 flex-col gap-1 px-3 py-2">
+        <Link
+          href="/import"
+          className={cn(
+            "mb-2 flex items-center gap-2 rounded-lg border px-3 py-2 text-sm font-medium transition-colors",
+            pathname === "/import"
+              ? "border-primary bg-primary text-primary-foreground"
+              : "border-primary/30 bg-primary/5 text-primary hover:bg-primary/10"
+          )}
+        >
+          <FolderUp className="h-4 w-4" />
+          新建分析
+        </Link>
         {NAV.map((item) => {
           const active = item.href === "/" ? pathname === "/" : pathname.startsWith(item.href);
           const Icon = item.icon;

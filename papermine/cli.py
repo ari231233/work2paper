@@ -3,6 +3,7 @@
 - 旧版（v0.1 确定性管线）：``python -m papermine <path>``（保持向后兼容）。
 - 新版（M7 编排器）：``analyze`` / ``resume`` / ``status`` 子命令。
 - M13：``trace`` 子命令（按耗时排序汇总执行轨迹，定位瓶颈）。
+- M26：``web`` 子命令（统一启动本地 FastAPI + Next.js）。
 """
 from __future__ import annotations
 
@@ -100,6 +101,34 @@ def _cmd_trace(argv) -> int:
     return 0
 
 
+def _cmd_web(argv) -> int:
+    parser = argparse.ArgumentParser(
+        prog="papermine web",
+        description="启动本地科研决策工作台（FastAPI + Next.js）。",
+    )
+    parser.add_argument("--host", default="127.0.0.1", help="监听地址（默认仅本机）")
+    parser.add_argument("--api-port", type=int, default=8000, help="后端端口，默认 8000")
+    parser.add_argument("--web-port", type=int, default=3000, help="前端端口，默认 3000")
+    parser.add_argument("--no-browser", action="store_true", help="启动后不自动打开浏览器")
+    parser.add_argument("--dev", action="store_true", help="使用 Next.js 开发服务器")
+    ns = parser.parse_args(argv)
+    if not (1 <= ns.api_port <= 65535 and 1 <= ns.web_port <= 65535):
+        print("错误：端口必须在 1~65535 之间", file=sys.stderr)
+        return 2
+    if ns.api_port == ns.web_port:
+        print("错误：前后端端口不能相同", file=sys.stderr)
+        return 2
+    try:
+        from .web_launcher import run_web
+        return run_web(
+            host=ns.host, api_port=ns.api_port, web_port=ns.web_port,
+            open_browser=not ns.no_browser, dev=ns.dev,
+        )
+    except (ImportError, RuntimeError, OSError) as exc:
+        print("错误：{}".format(exc), file=sys.stderr)
+        return 2
+
+
 def _dispatch(command: str, argv) -> int:
     if command == "analyze":
         return _cmd_analyze(argv)
@@ -109,6 +138,8 @@ def _dispatch(command: str, argv) -> int:
         return _cmd_status(argv)
     if command == "trace":
         return _cmd_trace(argv)
+    if command == "web":
+        return _cmd_web(argv)
     return 2
 
 
@@ -152,7 +183,7 @@ def _legacy_main(argv) -> int:
 def main(argv=None) -> int:
     _reconfigure_stdio()
     argv = list(sys.argv[1:] if argv is None else argv)
-    if argv and argv[0] in ("analyze", "resume", "status", "trace"):
+    if argv and argv[0] in ("analyze", "resume", "status", "trace", "web"):
         return _dispatch(argv[0], argv[1:])
     return _legacy_main(argv)
 

@@ -4,9 +4,9 @@
   "private": true,
   "description": "PaperMine 科研决策工作台前端（M25）：Next.js + Tailwind + shadcn/ui + Recharts + React Flow。",
   "scripts": {
-    "dev": "next dev",
+    "dev": "node server.mjs --dev",
     "build": "next build",
-    "start": "next start",
+    "start": "node server.mjs",
     "lint": "next lint"
   },
   "dependencies": {

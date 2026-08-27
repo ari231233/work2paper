@@ -1,6 +1,7 @@
 "use client";
 
 import type { ReactNode } from "react";
+import { usePathname } from "next/navigation";
 
 import { useProject } from "@/hooks/use-project";
 import { Sidebar } from "./sidebar";
@@ -26,6 +27,8 @@ function LoadingState() {
 
 export function AppShell({ children }: { children: ReactNode }) {
   const { loading, error, dossier } = useProject();
+  const pathname = usePathname();
+  const importing = pathname === "/import";
   // 已有旧数据时不整页挡内容：首次加载失败才显示全屏错误，重新验证失败只显示顶部横条。
   const hasData = Boolean(dossier);
 
@@ -36,7 +39,9 @@ export function AppShell({ children }: { children: ReactNode }) {
         <div className="flex flex-1 overflow-hidden">
           <Sidebar />
           <main className="relative flex-1 overflow-y-auto">
-            {loading && !hasData ? (
+            {importing ? (
+              children
+            ) : loading && !hasData ? (
               <LoadingState />
             ) : error && !hasData ? (
               <ErrorNotice message={error} variant="full" />
@@ -48,7 +53,7 @@ export function AppShell({ children }: { children: ReactNode }) {
             )}
           </main>
         </div>
-        <AskPaperMine />
+        {importing ? null : <AskPaperMine />}
       </div>
     </TooltipProvider>
   );
