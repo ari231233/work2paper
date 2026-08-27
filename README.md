@@ -45,7 +45,7 @@ python -m papermine resume <run_id>
 Web 客户端需要 Python 3.8+ 与 Node.js 18+。首次安装：
 
 ```bash
-git clone <repository-url>
+git clone https://github.com/ari231233/work2paper.git papermine
 cd papermine
 pip install -e ".[web]"
 

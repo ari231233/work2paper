@@ -19,6 +19,12 @@ classifiers = [
     "Intended Audience :: Science/Research",
 ]
 
+[project.urls]
+Homepage = "https://github.com/ari231233/work2paper"
+Repository = "https://github.com/ari231233/work2paper.git"
+Issues = "https://github.com/ari231233/work2paper/issues"
+Changelog = "https://github.com/ari231233/work2paper/blob/main/CHANGELOG.md"
+
 [project.optional-dependencies]
 dev = ["pytest>=7.0"]
 # Web 外壳（M24/M25）：FastAPI + uvicorn 作为可选依赖，核心依赖仍只有 httpx（架构 §15「核心引擎 + 多外壳」）。
