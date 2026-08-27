@@ -14,6 +14,7 @@
 - Web 可选依赖新增 `python-multipart`；核心运行依赖仍只有 `httpx`
 - 用户项目先复制到 `~/.papermine/imports/<import_id>/source/`，分析不修改原始目录
 - Web 安装说明改用可直接复制的 GitHub 仓库地址，并补齐项目主页、源码、Issue 与 Changelog 元数据
+- README Web 安装教程重写为 Windows 小白流程，补充环境验证、虚拟环境、API Key、日常启动、更新与故障排查
 - 测试从 364 增至 374 个
 
 ## [0.3.0]

@@ -40,33 +40,196 @@ python -m papermine resume <run_id>
 
 分析结果写入 `~/.papermine/runs/<run_id>/report.md`。
 
-## 本地 Web 客户端
+## Windows 安装与打开 Web 客户端（小白教程）
 
-Web 客户端需要 Python 3.8+ 与 Node.js 18+。首次安装：
+下面的步骤只需要在**第一次使用**时完整执行。安装完成后，再次打开只需要执行最后的“日常启动”步骤。
 
-```bash
+### 1. 安装三个基础软件
+
+请依次安装：
+
+1. [Git for Windows](https://git-scm.com/download/win)：用于从 GitHub 下载和更新 papermine。安装时保持默认选项即可。
+2. [Python](https://www.python.org/downloads/windows/)：需要 Python 3.8 或更高版本。安装界面请勾选 **Add Python to PATH**。
+3. [Node.js](https://nodejs.org/)：需要 Node.js 18 或更高版本，建议安装网站提供的 LTS 版本。npm 会随 Node.js 一起安装。
+
+安装完成后，关闭并重新打开 PowerShell。在 Windows 开始菜单中搜索 `PowerShell` 即可打开。逐条执行下面三个命令：
+
+```powershell
+git --version
+python --version
+node --version
+npm --version
+```
+
+每条命令都能显示版本号，说明环境安装成功。如果 `python` 无法识别，也可以尝试 `py --version`；后续命令中的 `python` 可相应替换为 `py`。
+
+### 2. 下载 papermine
+
+在 PowerShell 中执行：
+
+```powershell
 git clone https://github.com/ari231233/work2paper.git papermine
 cd papermine
-pip install -e ".[web]"
+```
 
-cd web/frontend
+第一条命令会把项目下载到当前目录下的 `papermine` 文件夹，第二条命令会进入该文件夹。以后执行 papermine 命令前，也需要先进入这个文件夹。
+
+### 3. 创建独立的 Python 环境
+
+继续执行：
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+```
+
+成功后，PowerShell 命令行开头通常会出现 `(.venv)`。这个独立环境可以避免 papermine 的依赖影响电脑上的其他 Python 项目。
+
+如果 PowerShell 提示“禁止运行脚本”，先执行下面这条命令，只为当前 PowerShell 窗口临时允许脚本运行，然后再次激活：
+
+```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+.\.venv\Scripts\Activate.ps1
+```
+
+### 4. 安装 Python 与网页依赖
+
+确认命令行开头有 `(.venv)`，然后执行：
+
+```powershell
+python -m pip install --upgrade pip
+python -m pip install -e ".[web]"
+cd web\frontend
 npm ci
 npm run build
-cd ../..
+cd ..\..
+```
 
-# 同时启动后端和前端，并自动打开浏览器
+`npm run build` 可能需要几分钟。看到构建成功的提示后再继续。安装过程中需要联网；如果网络中断，请重新执行失败的那条命令。
+
+### 5. 选择是否配置 DeepSeek API Key
+
+papermine 支持两种使用方式：
+
+#### 方式 A：暂不配置 API Key
+
+不需要做任何额外设置，可以直接进入下一步启动。此时不会调用 LLM，也不会产生模型费用；系统会使用本地确定性规则完成分析，但结果会更模板化，语义理解和创新点评估能力较弱。
+
+#### 方式 B：配置自己的 DeepSeek API Key（完整体验）
+
+API Key 必须由使用者自己提供，调用费用归 Key 的拥有者。可以登录 [DeepSeek 开放平台](https://platform.deepseek.com/) 创建并管理 API Key；如账户没有可用额度，需要按平台提示充值。不要把 Key 发给他人，也不要提交到 GitHub。
+
+在仓库根目录执行：
+
+```powershell
+Copy-Item .env.example .env
+notepad .env
+```
+
+记事本打开后，把这一行：
+
+```env
+DEEPSEEK_API_KEY=sk-xxxxxxxxxxxxxxxx
+```
+
+改成自己的真实 Key，例如：
+
+```env
+DEEPSEEK_API_KEY=你的真实DeepSeek_API_Key
+```
+
+保留以下默认配置，然后保存并关闭记事本：
+
+```env
+DEEPSEEK_BASE_URL=https://api.deepseek.com
+DEEPSEEK_MODEL=deepseek-chat
+```
+
+`.env` 已被 Git 忽略，不会随正常的 `git add` 或 `git push` 上传。若所在网络必须使用代理，可在 `.env` 中按自己的实际地址增加：
+
+```env
+PAPERMINE_PROXY=http://127.0.0.1:你的代理端口
+```
+
+### 6. 启动 Web 客户端
+
+确保 PowerShell 当前位于 `papermine` 根目录，并且命令行开头有 `(.venv)`，执行：
+
+```powershell
 papermine web
 ```
 
-常用选项：
+程序会同时启动本地后端和网页，并自动打开浏览器。默认地址是：
 
-```bash
-papermine web --no-browser
-papermine web --api-port 8100 --web-port 3100
-papermine web --dev
+<http://127.0.0.1:3000>
+
+如果浏览器没有自动打开，请手动复制这个地址到浏览器。启动窗口需要保持开启；关闭 PowerShell 会导致网页服务停止。
+
+如果提示无法识别 `papermine`，改用：
+
+```powershell
+python -m papermine web
 ```
 
-默认仅监听 `127.0.0.1`，不会向局域网或公网开放。进入 Web 后点击左侧「新建分析」，可以选择整个项目文件夹或上传 ZIP，在预览确认后创建分析 run。导入过程会把项目复制到 `~/.papermine/imports/`，不会修改用户的原始项目。
+### 7. 导入并分析自己的项目
+
+1. 在网页左侧点击“新建分析”。
+2. 选择“选择项目文件夹”或“上传 ZIP”。
+3. 等待上传完成，检查导入预览、文件数量和安全排除提示。
+4. 确认内容无误后，点击“确认并开始分析”。
+5. 分析期间不要关闭网页或启动 Web 的 PowerShell 窗口。
+6. 分析结束后会自动进入项目概览，可继续查看创新点、文献证据和论文路线图。
+
+导入时会把项目副本保存到 `%USERPROFILE%\.papermine\imports\`，分析结果保存到 `%USERPROFILE%\.papermine\runs\`。papermine 不会修改用户选择的原始项目目录。敏感文件和常见依赖目录会默认排除。
+
+### 8. 关闭 Web 客户端
+
+回到启动 papermine 的 PowerShell 窗口，按 `Ctrl+C`。前端和后端会一起关闭。浏览器中已经打开的页面随后将无法继续使用，这是正常现象。
+
+### 9. 以后再次打开（日常启动）
+
+打开新的 PowerShell，进入第一次下载的项目目录，然后执行：
+
+```powershell
+cd papermine
+.\.venv\Scripts\Activate.ps1
+papermine web
+```
+
+如果你的 PowerShell 当前所在位置不是 `papermine` 的上级目录，请把第一条命令改成实际的完整路径，例如：
+
+```powershell
+cd "D:\你的文件夹\papermine"
+```
+
+### 10. 更新到 GitHub 最新版本
+
+先关闭正在运行的 Web 客户端，再在仓库根目录执行：
+
+```powershell
+git pull origin main
+.\.venv\Scripts\Activate.ps1
+python -m pip install -e ".[web]"
+cd web\frontend
+npm ci
+npm run build
+cd ..\..
+papermine web
+```
+
+### 常见问题
+
+- **`git`、`python`、`node` 或 `npm` 无法识别**：确认对应软件已经安装，关闭所有 PowerShell 窗口后重新打开，再执行版本检查命令。
+- **无法激活 `.venv`**：按第 3 步执行临时的 `Set-ExecutionPolicy` 命令；它只影响当前窗口。
+- **`papermine` 无法识别**：确认已经激活 `.venv`，或使用 `python -m papermine web`。
+- **提示前端依赖未安装**：进入 `web\frontend` 执行 `npm ci`，再回到根目录启动。
+- **提示前端尚未构建**：进入 `web\frontend` 执行 `npm run build`。
+- **端口 3000 或 8000 被占用**：使用 `papermine web --api-port 8100 --web-port 3100`，然后访问 <http://127.0.0.1:3100>。
+- **没有 API Key**：程序仍能运行，并自动使用确定性降级模式；这不是安装失败。
+- **配置了 Key 但分析失败**：检查 `.env` 中的 Key、网络连接、DeepSeek 账户余额以及代理设置，然后重新分析。
+- **想禁止自动打开浏览器**：使用 `papermine web --no-browser`。
+
+默认情况下服务只监听 `127.0.0.1`，不会向局域网或公网开放。
 
 ## 输出报告
 
