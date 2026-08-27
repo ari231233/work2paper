@@ -23,8 +23,11 @@
 ## 快速开始
 
 ```bash
-# 安装核心 CLI（运行时依赖仅 httpx）
+# 安装核心 CLI（仅代码与纯文本扫描）
 pip install -e .
+
+# 如需解析 PDF / DOCX / PPTX 及中英文 OCR
+pip install -e ".[documents]"
 
 # 配置 DeepSeek key（可选；不配则走确定性降级）
 cp .env.example .env        # 填入 DEEPSEEK_API_KEY
@@ -118,6 +121,20 @@ cd ..\..
 ```
 
 `npm run build` 可能需要几分钟。看到构建成功的提示后再继续。安装过程中需要联网；如果网络中断，请重新执行失败的那条命令。
+
+`.[web]` 会同时安装 PDF、DOCX、PPTX 解析和本地中英文 OCR。OCR 组件首次下载约数十 MB，所需时间取决于网络速度；它不要求另外安装 Tesseract，也不会把待识别图片上传到第三方服务。
+
+如果使用代理，可在执行安装命令时临时指定代理。例如代理位于本机 7897 端口：
+
+```powershell
+python -m pip install --proxy http://127.0.0.1:7897 -e ".[web]"
+```
+
+如果官方 Python 下载源速度很慢，可在保持代理的同时使用国内镜像：
+
+```powershell
+python -m pip install --index-url https://pypi.tuna.tsinghua.edu.cn/simple --proxy http://127.0.0.1:7897 -e ".[web]"
+```
 
 ### 5. 选择是否配置 DeepSeek API Key
 
@@ -238,6 +255,8 @@ papermine web
 - **端口 3000 或 8000 被占用**：使用 `papermine web --api-port 8100 --web-port 3100`，然后访问 <http://127.0.0.1:3100>。
 - **没有 API Key**：程序仍能运行，并自动使用确定性降级模式；这不是安装失败。
 - **配置了 Key 但分析失败**：检查 `.env` 中的 Key、网络连接、DeepSeek 账户余额以及代理设置，然后重新分析。
+- **PDF、Word 或 PPT 没有识别出正文**：确认安装命令使用的是 `python -m pip install -e ".[web]"`；旧版 `.doc`、`.ppt` 不在当前支持范围内，请先用 Office 另存为 `.docx`、`.pptx`。
+- **首次分析扫描件较慢**：扫描型 PDF 和文档内图片需要在本机逐页 OCR，速度取决于页数、图片尺寸和电脑性能；文本型 PDF 会直接读取文本层，通常更快。
 - **D 盘不存在或想安装到其他盘**：把教程命令中路径开头的 `D` 统一改成已有盘符，例如 `E`；不要改路径中的其他内容。
 - **想禁止自动打开浏览器**：使用 `papermine web --no-browser`。
 
@@ -276,7 +295,9 @@ web/                       FastAPI API + Next.js 科研决策工作台
 
 - 无 DeepSeek key 时走确定性降级，产出较模板化（配 key 后为 LLM 语义级）
 - 检索走 arXiv / Semantic Scholar；知网后置、需遵守其 ToS
-- 代码静态分析目前仅覆盖 Python；docx / pptx / pdf 仅识别为资产、不解析内容
+- 代码的 AST 静态分析目前仅覆盖 Python；其他代码语言仍以文本与关键词信号为主
+- PDF 支持文本层与扫描页中英文 OCR；DOCX/PPTX 支持正文、表格、页眉页脚或演讲者备注及内嵌图片 OCR；旧版 `.doc`/`.ppt` 暂不支持
+- 为避免异常文档耗尽内存或长时间无响应，单个文档默认最多抽取 20 万字符、100 页和 60 张内嵌图片；达到预算会保留已识别内容并记录截断提示
 
 ## 后续方向
 

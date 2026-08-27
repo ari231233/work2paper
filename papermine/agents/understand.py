@@ -34,7 +34,7 @@ __all__ = [
 ]
 
 # 本 Agent 系统 prompt 版本：任何 prompt 改动必须 bump 并写入 meta.prompt_versions
-_PROMPT_VERSION = "v1"
+_PROMPT_VERSION = "v2"
 
 # 六元组中可由 LLM 语义纠偏的类别（关键词词典命中 → 可能误标 / 可合并 / 可去噪）
 _SEMANTIC_KEYS = ("tasks", "methods", "data", "scenarios", "metrics")
@@ -65,7 +65,7 @@ UNDERSTAND_SCHEMA: Dict[str, Any] = {
 
 _SYSTEM_PROMPT = (
     "你是 papermine 的「项目理解 Agent」。输入是确定性扫描得到的项目事实（facts，六元组标签）"
-    "与证据摘要，二者均已脱敏，不含完整源码。\n\n"
+    "与脱敏后的证据摘要；其中可能包含文档正文短摘录，但不含完整源码或完整文档。\n\n"
     "你的任务有两项：\n"
     "1. narrative：用 2~4 句学术中文，概括这个横向项目做什么、用什么方法、面向什么场景、"
     "关注什么指标。只基于给定 facts 与 evidence 归纳，不得编造 facts 之外的信息。\n"
@@ -74,6 +74,7 @@ _SYSTEM_PROMPT = (
     "   - 修正明显误标（关键词误命中导致的错误标签）；\n"
     "   - 去除与项目无关的偶发噪声标签；\n"
     "   - 仅当给定 evidence 中明确出现、但词典漏掉时才补充；\n"
+    "   - 文档标题、摘要或正文摘录的直接陈述优先于孤立关键词计数；两者冲突时删除误标；\n"
     "   - 每个类别返回「纠偏后的完整标签列表」（不是增量）；若无需修改，原样返回该类别。\n"
     "只纠偏 tasks / methods / data / scenarios / metrics 五类；"
     "libraries / modules 为客观提取，无需返回。"
@@ -95,7 +96,14 @@ def _facts_from_element(element: Any) -> Dict[str, List[str]]:
 
 def _build_user_prompt(facts: Dict[str, List[str]], evidence: List[dict]) -> str:
     """构造发给 LLM 的脱敏输入：结构化 facts + evidence 摘要（不回传源码）。"""
-    payload = {"facts": facts, "evidence": evidence}
+    excerpts = [item for item in evidence if str(item.get("snippet", "")).startswith("文档正文摘录")]
+    diagnostics = [item for item in evidence if str(item.get("snippet", "")).startswith("文档解析提示")]
+    keyword_hits = [
+        item for item in evidence
+        if item not in excerpts and item not in diagnostics
+    ]
+    selected_evidence = excerpts[:12] + diagnostics[:8] + keyword_hits[:40]
+    payload = {"facts": facts, "evidence": selected_evidence}
     return (
         "以下是确定性扫描得到的项目事实与证据摘要，请据此生成 narrative 与事实纠偏：\n"
         + json.dumps(payload, ensure_ascii=False)

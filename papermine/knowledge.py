@@ -5,12 +5,13 @@
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 from typing import Dict, List, Tuple
 
 from .extractor.code_extractor import analyze_code, is_reusable_name
-from .extractor.doc_extractor import read_asset_text
+from .extractor.doc_extractor import extract_asset_text
 from .models import Asset, Element, Evidence, Project
 
 # ---- 关键词词典：标签 -> [关键词...] ----
@@ -26,6 +27,8 @@ TASK_DICT = {
     "推荐": ["推荐", "recommend", "recommendation"],
     "目标检测": ["目标检测", "object detection", "yolo", "检测框"],
     "文本处理": ["文本", "自然语言", "nlp", "natural language", "分词"],
+    "避障与冲突消解": ["避障", "障碍规避", "obstacle avoidance", "collision avoidance", "daidalus"],
+    "轨迹跟踪": ["轨迹跟踪", "路径跟踪", "trajectory tracking", "path following", "tracking control"],
 }
 
 METHOD_DICT = {
@@ -38,6 +41,8 @@ METHOD_DICT = {
     "统计方法": ["统计", "statistic", "假设检验", "显著性"],
     "集成学习": ["集成", "ensemble", "stacking", "bagging", "boosting"],
     "流水线/框架": ["pipeline", "流水线", "framework", "框架", "workflow"],
+    "飞行控制": ["飞行控制", "flight control", "prescribed performance control", "ppc", "制导律", "guidance law"],
+    "鲁棒控制": ["鲁棒控制", "robust control", "prescribed performance", "闭环控制", "closed-loop control"],
 }
 
 DATA_DICT = {
@@ -56,6 +61,7 @@ SCENARIO_DICT = {
     "金融风控": ["金融", "风控", "finance", "risk control", "信贷"],
     "物联网": ["物联网", "iot", "设备联网", "边缘"],
     "能源电力": ["能源", "电力", "energy", "power", "电网", "风电", "光伏"],
+    "航空航天": ["航空", "航天", "aerospace", "aircraft", "evtol", "uav", "无人机", "nasa guam", "lift+cruise"],
 }
 
 METRIC_DICT = {
@@ -79,12 +85,53 @@ CATEGORY_CN = {"task": "任务", "method": "方法", "data": "数据", "scenario
 
 
 def _kw_count(kw: str, text_lower: str) -> int:
-    """统计关键词命中次数。短英文词用词边界，其余用子串匹配以覆盖驼峰/下划线命名。"""
+    """统计关键词命中次数；英文词使用词元边界，避免 text 命中 context。"""
     if re.search(r"[a-z]", kw):
-        if len(kw) < 4:
-            return len(re.findall(r"\b" + re.escape(kw) + r"\b", text_lower))
-        return text_lower.count(kw)
+        pattern = r"(?<![a-z0-9])" + re.escape(kw) + r"(?![a-z0-9])"
+        return len(re.findall(pattern, text_lower))
     return text_lower.count(kw)
+
+
+def _document_excerpt(text: str, limit: int = 1200) -> str:
+    """提取供项目理解使用的短正文证据，压平空白并限制长度。"""
+    compact = re.sub(r"\s+", " ", text).strip()
+    compact = re.sub(
+        r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b",
+        "[邮箱已脱敏]",
+        compact,
+        flags=re.IGNORECASE,
+    )
+    compact = re.sub(
+        r"(?i)\b(?:api[_-]?key|token|password)\s*[:=]\s*[^\s,;]+",
+        "[凭据已脱敏]",
+        compact,
+    )
+    return compact[:limit]
+
+
+def _document_priority(path: str) -> Tuple[int, int, str]:
+    """正文证据优先当前主稿，降低 archive/tmp/backup 历史副本权重。"""
+    lowered = path.lower()
+    noisy = ("archive", "backup", "tmp", "old", "obsolete", "history")
+    penalty = 1 if any(part in lowered.split("/") for part in noisy) else 0
+    return penalty, lowered.count("/"), lowered
+
+
+def _select_excerpt_evidence(
+    candidates: List[Tuple[Tuple[int, int, str], str, str]], limit: int = 12
+) -> List[Evidence]:
+    """按稿件优先级选择正文证据，并对相同摘录去重。"""
+    selected: List[Evidence] = []
+    seen: set = set()
+    for _, source, excerpt in sorted(candidates, key=lambda item: item[0]):
+        fingerprint = hashlib.sha256(excerpt.lower().encode("utf-8")).hexdigest()
+        if fingerprint in seen:
+            continue
+        seen.add(fingerprint)
+        selected.append(Evidence(source=source, snippet="文档正文摘录：{}".format(excerpt)))
+        if len(selected) >= limit:
+            break
+    return selected
 
 
 def _match_labels(text_lower: str) -> Dict[str, Dict[str, int]]:
@@ -111,6 +158,8 @@ def extract_elements(project: Project) -> Tuple[Element, List[Evidence]]:
     acc: Dict[str, Dict[str, int]] = {cat: {} for cat in ALL_DICTS}
     lib_counts: Dict[str, int] = {}
     reusable: List[Tuple[str, str]] = []
+    excerpt_candidates: List[Tuple[Tuple[int, int, str], str, str]] = []
+    seen_documents: set = set()
 
     for asset in project.assets:
         full = os.path.join(project.root, asset.path)
@@ -132,7 +181,29 @@ def extract_elements(project: Project) -> Tuple[Element, List[Evidence]]:
                 if is_reusable_name(name):
                     reusable.append((name, asset.path))
         elif asset.kind in ("readme", "doc"):
-            text_lower = read_asset_text(project.root, asset).lower()
+            extracted = extract_asset_text(project.root, asset)
+            text_lower = extracted.text.lower()
+            normalized = re.sub(r"\s+", " ", text_lower).strip()
+            duplicate = False
+            if normalized:
+                fingerprint = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+                if fingerprint in seen_documents:
+                    duplicate = True
+                else:
+                    seen_documents.add(fingerprint)
+            if extracted.text:
+                excerpt = _document_excerpt(extracted.text)
+                if excerpt:
+                    excerpt_candidates.append(
+                        (_document_priority(asset.path), asset.path, excerpt)
+                    )
+            for warning in extracted.warnings[:2]:
+                evidence.append(Evidence(
+                    source=asset.path,
+                    snippet="文档解析提示：{}".format(warning),
+                ))
+            if duplicate:
+                continue
         else:
             continue
 
@@ -149,6 +220,9 @@ def extract_elements(project: Project) -> Tuple[Element, List[Evidence]]:
                     source=asset.path,
                     snippet="命中{}「{}」（{} 次）".format(CATEGORY_CN[cat], label, cnt),
                 ))
+
+    excerpt_evidence = _select_excerpt_evidence(excerpt_candidates)
+    evidence = excerpt_evidence + evidence
 
     element.tasks = _ranked(acc["task"])
     element.methods = _ranked(acc["method"])

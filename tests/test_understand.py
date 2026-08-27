@@ -53,7 +53,7 @@ class UnderstandAgentTest(unittest.TestCase):
             self.assertIn("source", ev)
             self.assertIn("snippet", ev)
         # 记录 prompt 版本，供可重放
-        self.assertEqual(d.meta["prompt_versions"]["understand"], "v1")
+        self.assertEqual(d.meta["prompt_versions"]["understand"], "v2")
 
     def test_run_with_llm_uses_narrative_and_semantic_correction(self):
         d = Dossier()
