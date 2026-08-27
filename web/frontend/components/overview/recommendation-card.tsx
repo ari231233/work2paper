@@ -1,35 +1,32 @@
 "use client";
 
 import Link from "next/link";
-import { ArrowRight, CheckCircle2, ShieldAlert, Sparkles, Star } from "lucide-react";
+import { ArrowRight, CheckCircle2, ShieldAlert, Sparkles } from "lucide-react";
 
 import { useProject } from "@/hooks/use-project";
 import {
   computeMetrics,
+  decisionFor,
   nextActions,
   riskItems,
   selectedPair,
   whyThis,
 } from "@/lib/derive";
-import { starRating, typeLabel, VERDICT_LABELS, VERDICT_TONES } from "@/lib/format";
+import { typeLabel } from "@/lib/format";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Separator } from "@/components/ui/separator";
 import { MetricTiles } from "./metric-tiles";
+import { DecisionBadge } from "@/components/decision/decision-badge";
 import { clean, clip } from "@/lib/utils";
-
-const TONE_BADGE: Record<string, "default" | "success" | "warning" | "destructive"> = {
-  good: "success",
-  warn: "warning",
-  bad: "destructive",
-};
 
 export function RecommendationCard() {
   const { dossier, roadmap } = useProject();
   const { idea, evaluation } = selectedPair(dossier);
   const metrics = computeMetrics(evaluation, roadmap);
   const risks = riskItems(roadmap, evaluation);
+  const decision = decisionFor(dossier, idea?.idea_id);
 
   if (!idea) {
     return (
@@ -48,11 +45,7 @@ export function RecommendationCard() {
           <span className="flex items-center gap-1.5 rounded-full bg-primary/10 px-3 py-1 text-xs font-semibold text-primary">
             <Sparkles className="h-3.5 w-3.5" /> Research Recommendation
           </span>
-          {evaluation?.verdict && (
-            <Badge variant={TONE_BADGE[VERDICT_TONES[evaluation.verdict]] ?? "default"}>
-              {VERDICT_LABELS[evaluation.verdict]}
-            </Badge>
-          )}
+          <DecisionBadge info={decision} />
           <Badge variant="outline">{typeLabel(evaluation)}</Badge>
           <Badge variant="outline">{clean(roadmap?.paper_type) || "论文类型待定"}</Badge>
         </div>
@@ -62,10 +55,9 @@ export function RecommendationCard() {
             {clean(idea.claim)}
           </Link>
         </CardTitle>
-        <CardDescription className="flex items-center gap-1.5 pt-1">
-          <Star className="h-3.5 w-3.5 text-amber-500" />
-          {starRating(evaluation?.verdict, evaluation?.novelty_score)}
-        </CardDescription>
+        {decision && (
+          <CardDescription className="pt-1">判定依据：{decision.reason}</CardDescription>
+        )}
       </CardHeader>
 
       <CardContent className="space-y-5">

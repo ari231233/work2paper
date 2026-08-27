@@ -4,6 +4,7 @@ import { ScrollText, Target } from "lucide-react";
 
 import { useProject } from "@/hooks/use-project";
 import { RecommendationCard } from "@/components/overview/recommendation-card";
+import { ProjectUnderstanding } from "@/components/overview/project-understanding";
 import { PipelineStrip } from "@/components/overview/pipeline-strip";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -19,6 +20,8 @@ export default function OverviewPage() {
   return (
     <div className="space-y-5 p-6">
       <PipelineStrip />
+
+      <ProjectUnderstanding />
 
       <RecommendationCard />
 

@@ -40,8 +40,20 @@ function ErrorState({ message }: { message: string }) {
   );
 }
 
+/** 重新验证失败时的非阻塞提示：保留旧数据，不整页挡内容（M25 v2.2）。 */
+function ErrorBanner({ message }: { message: string }) {
+  return (
+    <div className="flex items-center gap-2 border-b bg-amber-50 px-4 py-2 text-xs text-amber-800 dark:bg-amber-900/30 dark:text-amber-200">
+      <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+      <span className="truncate">{message}</span>
+    </div>
+  );
+}
+
 export function AppShell({ children }: { children: ReactNode }) {
-  const { loading, error } = useProject();
+  const { loading, error, dossier } = useProject();
+  // 已有旧数据时不整页挡内容：首次加载失败才显示全屏错误，重新验证失败只显示顶部横条。
+  const hasData = Boolean(dossier);
 
   return (
     <TooltipProvider delayDuration={200}>
@@ -50,7 +62,16 @@ export function AppShell({ children }: { children: ReactNode }) {
         <div className="flex flex-1 overflow-hidden">
           <Sidebar />
           <main className="relative flex-1 overflow-y-auto">
-            {loading ? <LoadingState /> : error ? <ErrorState message={error} /> : children}
+            {loading && !hasData ? (
+              <LoadingState />
+            ) : error && !hasData ? (
+              <ErrorState message={error} />
+            ) : (
+              <>
+                {error ? <ErrorBanner message={error} /> : null}
+                {children}
+              </>
+            )}
           </main>
         </div>
         <AskPaperMine />

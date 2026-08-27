@@ -9,11 +9,14 @@
 import type {
   Dossier,
   Evaluation,
+  EvidenceLevel,
+  Feasibility,
   Idea,
   IdeaWithEval,
   LiteratureEntry,
   Paper,
   Roadmap,
+  Verdict,
 } from "./types";
 import {
   ATTACK_KEYS,
@@ -21,6 +24,7 @@ import {
   MATRIX_LABELS,
   evidenceLabel,
   feasibilityLabel,
+  noveltyBandLabel,
   num,
   strengthLabel,
   strengthOrder,
@@ -271,7 +275,7 @@ export function computeMetrics(
       label: "Novelty",
       value: novVal,
       display: num(novelty),
-      level: ev?.novelty_band || "未评估",
+      level: ev?.novelty_band ? noveltyBandLabel(ev.novelty_band) : "未评估",
       tone: novTone,
       detail: "5 维加权（问题/方法/深度/gap/推广），分数由规则算出",
     },
@@ -463,4 +467,125 @@ export function gapEvidenceLevel(g?: { type?: string; evidence_level?: string; g
   if (!g) return null;
   if (g.type === "contradiction") return g.evidence_level ?? null;
   return g.gap_hypothesis?.evidence_level ?? null;
+}
+
+// ---------------------------------------------------------------------------
+// 决策状态层（M25 v2.3）：三层决策语义，统一全站「推荐」口径。
+//
+// 判定规则放在前端、不改后端 schema。派生依据 = verdict + evidence_validation.evidence
+// + data_feasibility + 相对排名（selectedPair）：
+//   - 建议实施     ：verdict=proceed 且证据（medium/strong）与数据可得性（high/medium）达标；
+//   - 首选探索方向 ：候选相对最好（selectedPair），但尚未通过上述证据/可行性门槛；
+//   - 暂不建议     ：其余（verdict=drop → 换方向；证据弱 → 证据不足，暂不通过；数据可得性低）。
+// 任一 idea 全站只呈现一种决策状态 + 一处相对排名，不再同时出现「Recommended」与「Weak Reject」。
+// ---------------------------------------------------------------------------
+
+export type DecisionState = "preferred" | "recommend" | "not_now";
+export type DecisionTone = "good" | "warn" | "bad" | "neutral";
+
+export interface DecisionInfo {
+  state: DecisionState;
+  /** 相对排名（1 起，首选=1；与 rankedIdeas/selectedPair 对齐） */
+  rank: number;
+  /** 是否相对最好（selectedPair 选中） */
+  isSelected: boolean;
+  label: string;
+  /** 门槛/结论短提示，拼接在 label 后（「首选探索方向｜尚未通过证据门槛」） */
+  hint: string;
+  summary: string;
+  tone: DecisionTone;
+  /** 追溯依据（一句话） */
+  reason: string;
+  evidence: EvidenceLevel | null;
+  feasibility: Feasibility | null;
+  verdict: Verdict | null;
+}
+
+const VERDICT_TEXT: Record<string, string> = { proceed: "推荐", rework: "可改进", drop: "不建议" };
+
+function gateReason(verdict?: Verdict | null, evidence?: EvidenceLevel | null, feas?: Feasibility | null): string {
+  const parts: string[] = [];
+  if (verdict) parts.push(`verdict=${VERDICT_TEXT[verdict] ?? verdict}`);
+  if (evidence) parts.push(`证据${evidenceLabel(evidence)}`);
+  if (feas) parts.push(`数据可得性${feasibilityLabel(feas)}`);
+  return parts.join(" · ") || "未评估";
+}
+
+export function decisionFor(dossier: Dossier | null | undefined, ideaId?: string): DecisionInfo | null {
+  if (!ideaId) return null;
+  const ranked = rankedIdeas(dossier?.ideas, dossier?.evaluations);
+  const idx = ranked.findIndex((p) => String(p.idea.idea_id) === String(ideaId));
+  const sel = selectedPair(dossier);
+  const isSelected = Boolean(sel.idea && String(sel.idea.idea_id) === String(ideaId));
+  const rank = idx >= 0 ? idx + 1 : isSelected ? 1 : 0;
+
+  const ev = evaluationFor(dossier, ideaId);
+  const evidence = ev?.evidence_validation?.evidence ?? null;
+  const feas = ev?.data_feasibility ?? null;
+  const verdict = ev?.verdict ?? null;
+
+  const base = { rank, isSelected, evidence, feasibility: feas, verdict };
+
+  if (!ev) {
+    return {
+      ...base,
+      state: isSelected ? "preferred" : "not_now",
+      label: isSelected ? "首选探索方向" : "待评估",
+      hint: "尚未评估",
+      summary: isSelected ? "首选探索方向｜尚未评估" : "待评估",
+      tone: "neutral",
+      reason: "该 idea 尚未评估",
+    };
+  }
+
+  const passedGate =
+    verdict === "proceed" &&
+    (evidence === "medium" || evidence === "strong") &&
+    (feas === "high" || feas === "medium");
+
+  let state: DecisionState;
+  let label: string;
+  let hint: string;
+  let tone: DecisionTone;
+  let reason: string;
+
+  if (passedGate) {
+    state = "recommend";
+    label = "建议实施";
+    hint = "证据与可行性达标";
+    tone = "good";
+    reason = gateReason(verdict, evidence, feas);
+  } else if (verdict === "drop") {
+    state = "not_now";
+    label = "暂不建议";
+    hint = "建议换方向";
+    tone = "bad";
+    reason = `评估结论为不建议（drop）${ev.rework_reason ? `：${clip(ev.rework_reason, 60)}` : ""}`;
+  } else if (feas === "low") {
+    state = "not_now";
+    label = "暂不建议";
+    hint = "数据可得性不足";
+    tone = "warn";
+    reason = "数据可得性低，需先补数据";
+  } else if (isSelected) {
+    state = "preferred";
+    label = "首选探索方向";
+    hint = "尚未通过证据门槛";
+    tone = "neutral";
+    reason = gateReason(verdict, evidence, feas);
+  } else if (evidence === "weak") {
+    state = "not_now";
+    label = "暂不建议";
+    hint = "证据不足，暂不通过";
+    tone = "warn";
+    reason = gateReason(verdict, evidence, feas);
+  } else {
+    state = "not_now";
+    label = "暂不建议";
+    hint = "需补证据";
+    tone = "warn";
+    reason = gateReason(verdict, evidence, feas);
+  }
+
+  return { ...base, state, label, hint, summary: `${label}｜${hint}`, tone, reason };
 }

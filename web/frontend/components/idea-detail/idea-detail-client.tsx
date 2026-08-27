@@ -6,8 +6,8 @@ import { useParams, useSearchParams } from "next/navigation";
 import { ArrowLeft } from "lucide-react";
 
 import { useProject } from "@/hooks/use-project";
-import { computeMetrics, matrixRows } from "@/lib/derive";
-import { join, starRating, typeLabel, VERDICT_LABELS } from "@/lib/format";
+import { computeMetrics, decisionFor, matrixRows } from "@/lib/derive";
+import { join, typeLabel } from "@/lib/format";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -19,13 +19,8 @@ import { ReviewerRisk } from "./reviewer-risk";
 import { EvidenceTab } from "./evidence-tab";
 import { ExperimentMatrix } from "@/components/roadmap/experiment-matrix";
 import { EmptyState } from "@/components/ui/empty-state";
+import { DecisionBadge } from "@/components/decision/decision-badge";
 import { asList, clean } from "@/lib/utils";
-
-const VERDICT_BADGE: Record<string, "success" | "warning" | "destructive"> = {
-  proceed: "success",
-  rework: "warning",
-  drop: "destructive",
-};
 
 export function IdeaDetailClient() {
   const params = useParams<{ id: string }>();
@@ -51,6 +46,7 @@ export function IdeaDetailClient() {
   const metrics = computeMetrics(evaluation, roadmap);
   const isSelected = String(roadmap?.selected_idea) === String(id);
   const rows = matrixRows(evaluation);
+  const decision = decisionFor(dossier, idea.idea_id);
 
   return (
     <div className="space-y-5 p-6">
@@ -67,16 +63,8 @@ export function IdeaDetailClient() {
         <CardContent className="space-y-4 p-5">
           <div className="flex flex-wrap items-center gap-2">
             <code className="text-lg font-semibold text-primary">{idea.idea_id}</code>
-            {isSelected && (
-              <Badge variant="accent">⭐ Recommended</Badge>
-            )}
-            {evaluation?.verdict && (
-              <Badge variant={VERDICT_BADGE[evaluation.verdict]}>{VERDICT_LABELS[evaluation.verdict]}</Badge>
-            )}
+            <DecisionBadge info={decision} />
             <Badge variant="outline">{typeLabel(evaluation)}</Badge>
-            <span className="text-xs text-muted-foreground">
-              {starRating(evaluation?.verdict, evaluation?.novelty_score)}
-            </span>
           </div>
 
           <h1 className="text-xl font-semibold leading-snug">{clean(idea.claim)}</h1>

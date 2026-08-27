@@ -39,7 +39,10 @@ interface ProjectContextValue {
   gaps: GapPayload[];
   roadmap: Roadmap | null;
   history: HistoryResponse | null;
+  /** 首次加载中（允许整页骨架） */
   loading: boolean;
+  /** 重新验证中（保留旧数据，静默刷新，仅用于刷新按钮等轻量反馈） */
+  refreshing: boolean;
   error: string | null;
   /** 当前正在执行的操作（Ask PaperMine 快捷按钮反馈用） */
   action: ActionKind | null;
@@ -65,13 +68,21 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
   const [roadmap, setRoadmap] = useState<Roadmap | null>(null);
   const [history, setHistory] = useState<HistoryResponse | null>(null);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [action, setAction] = useState<ActionKind | null>(null);
-  const loadingRef = useRef(false);
+
+  // 请求版本号：每次 loadProject 自增；只有「最新」的那次响应才允许写状态，
+  // 过期（慢）响应直接丢弃，避免旧项目数据覆盖新选择。
+  const requestSeq = useRef(0);
+  // 是否已完成过一次成功加载：用于区分「首次加载（允许骨架）」与「重新验证（保留旧数据）」。
+  const hasLoadedRef = useRef(false);
 
   const loadProject = useCallback(async (id: string) => {
-    loadingRef.current = true;
-    setLoading(true);
+    const seq = ++requestSeq.current;
+    const initial = !hasLoadedRef.current;
+    if (initial) setLoading(true);
+    else setRefreshing(true);
     setError(null);
     try {
       const [proj, ideasRes, litRes, gapsRes, roadmapRes, histRes] = await Promise.all([
@@ -82,6 +93,7 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
         api.getRoadmap(id),
         api.getHistory(id),
       ]);
+      if (seq !== requestSeq.current) return; // 过期响应，丢弃
       setProjectId(id);
       setDossier(proj.dossier ?? null);
       setDecisionReport(proj.decision_report ?? null);
@@ -91,11 +103,15 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
       setGaps(gapsRes.gaps ?? []);
       setRoadmap(roadmapRes.roadmap ?? null);
       setHistory(histRes ?? null);
+      hasLoadedRef.current = true;
     } catch (err) {
+      if (seq !== requestSeq.current) return;
       setError(err instanceof Error ? err.message : String(err));
     } finally {
-      loadingRef.current = false;
-      setLoading(false);
+      if (seq === requestSeq.current) {
+        setLoading(false);
+        setRefreshing(false);
+      }
     }
   }, []);
 
@@ -120,6 +136,8 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
     })();
     return () => {
       cancelled = true;
+      // 组件卸载后使在途请求失效，避免卸载后写状态。
+      requestSeq.current += 1;
     };
   }, [loadProject]);
 
@@ -194,6 +212,7 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
       roadmap,
       history,
       loading,
+      refreshing,
       error,
       action,
       selectProject,
@@ -215,6 +234,7 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
       roadmap,
       history,
       loading,
+      refreshing,
       error,
       action,
       selectProject,

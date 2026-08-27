@@ -3,11 +3,10 @@
 import { useMemo, useState } from "react";
 
 import { useProject } from "@/hooks/use-project";
-import { rankedIdeas, thesisFitScore } from "@/lib/derive";
+import { decisionFor, rankedIdeas, thesisFitScore } from "@/lib/derive";
 import { IdeaCard } from "@/components/ideas/idea-card";
 import { EmptyState } from "@/components/ui/empty-state";
 import type { IdeaWithEval } from "@/lib/types";
-import { clean } from "@/lib/utils";
 
 type SortKey = "thesisFit" | "novelty" | "feasibility" | "evidence" | "workload";
 
@@ -50,7 +49,6 @@ export default function IdeasPage() {
 
   const ranked = useMemo(() => rankedIdeas(dossier?.ideas, dossier?.evaluations), [dossier]);
   const sorted = useMemo(() => sortBy(ranked, sort), [ranked, sort]);
-  const selectedId = clean(dossier?.roadmap?.selected_idea);
 
   return (
     <div className="space-y-5 p-6">
@@ -81,7 +79,7 @@ export default function IdeasPage() {
             <IdeaCard
               key={pair.idea.idea_id}
               pair={pair}
-              recommended={String(pair.idea.idea_id) === selectedId}
+              decision={decisionFor(dossier, pair.idea.idea_id)}
             />
           ))}
         </div>

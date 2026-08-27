@@ -23,13 +23,16 @@ export function Landscape() {
     <div className="space-y-6">
       {literature.map((entry, idx) => {
         const papers = asList(entry.papers).filter((p) => clean(p.title));
+        const gaps = asList(entry.contradiction_graph?.gaps).filter((g) => clean(g.gap_id));
         if (!papers.length) return null;
         return (
           <div key={idx}>
             <div className="mb-2 flex flex-wrap items-center gap-2">
               <Badge variant="secondary">Query {idx + 1}</Badge>
               <span className="text-xs text-muted-foreground">{clip(entry.query, 140)}</span>
-              <span className="text-xs text-muted-foreground/70">· {papers.length} 篇</span>
+              <span className="text-xs text-muted-foreground/70">
+                · {papers.length} 篇 · {gaps.length} 个 gap
+              </span>
             </div>
             <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
               {papers.map((paper) => {

@@ -90,6 +90,15 @@ export const GAP_EVIDENCE_LABELS: Record<string, string> = {
   strong: "强",
 };
 
+// novelty 分数段标签 → 产品语言（M25 v2.3：Weak Reject → 证据不足，暂不通过）
+export const NOVELTY_BAND_LABELS: Record<string, string> = {
+  Reject: "基本无创新",
+  "Weak Reject": "证据不足，暂不通过",
+  Revise: "需改进",
+  Accept: "可接受",
+  Priority: "优先",
+};
+
 export const CHECK_STATUS_LABELS: Record<string, string> = {
   ok: "到位",
   concern: "需补强",
@@ -135,6 +144,11 @@ export function evidenceLabel(lv?: EvidenceLevel | null): string {
 
 export function gapEvidenceLabel(lv?: string | null): string {
   return (lv && GAP_EVIDENCE_LABELS[lv]) || lv || "—";
+}
+
+export function noveltyBandLabel(band?: string | null): string {
+  if (!band) return "—";
+  return NOVELTY_BAND_LABELS[band] ?? band;
 }
 
 export function feasibilityLabel(f?: Feasibility | null): string {

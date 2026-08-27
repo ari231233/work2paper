@@ -81,6 +81,16 @@
 .react-flow__node {
   font-size: 12px;
 }
+.react-flow__node-queryNode {
+  border-radius: 0.5rem;
+  border: 1px solid hsl(var(--border));
+  background: hsl(var(--secondary));
+  color: hsl(var(--secondary-foreground));
+  padding: 0.5rem 0.75rem;
+  max-width: 280px;
+  cursor: pointer;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+}
 .react-flow__node-paperNode {
   border-radius: 0.5rem;
   border: 1px solid hsl(var(--border));
@@ -102,6 +112,27 @@
 }
 .react-flow__node-gapNode.selected {
   outline: 2px solid hsl(var(--primary));
+}
+.react-flow__node-gapNode.strong {
+  border-color: hsl(142 71% 45% / 0.65);
+  background: hsl(142 71% 96%);
+  color: hsl(142 71% 25%);
+}
+.react-flow__node-gapNode.weak {
+  border-color: hsl(38 92% 50% / 0.65);
+}
+.react-flow__node-gapNode.contradiction {
+  border-color: hsl(var(--destructive) / 0.65);
+  background: hsl(0 72% 96%);
+  color: hsl(0 72% 35%);
+}
+.dark .react-flow__node-gapNode.strong {
+  background: hsl(142 60% 16%);
+  color: hsl(142 60% 80%);
+}
+.dark .react-flow__node-gapNode.contradiction {
+  background: hsl(0 60% 16%);
+  color: hsl(0 60% 85%);
 }
 .react-flow__handle {
   width: 6px;
