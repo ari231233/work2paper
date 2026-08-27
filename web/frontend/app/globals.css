@@ -1,0 +1,110 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 222 47% 98%;
+    --foreground: 222 47% 11%;
+
+    --card: 0 0% 100%;
+    --card-foreground: 222 47% 11%;
+
+    --popover: 0 0% 100%;
+    --popover-foreground: 222 47% 11%;
+
+    /* 品牌主色：沉稳的靛蓝，贴合「科研决策工作台」的气质 */
+    --primary: 243 75% 52%;
+    --primary-foreground: 0 0% 100%;
+
+    --secondary: 222 24% 95%;
+    --secondary-foreground: 222 47% 20%;
+
+    --muted: 222 24% 95%;
+    --muted-foreground: 222 12% 45%;
+
+    --accent: 243 75% 96%;
+    --accent-foreground: 243 60% 30%;
+
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 0 0% 100%;
+
+    --border: 222 24% 88%;
+    --input: 222 24% 84%;
+    --ring: 243 75% 52%;
+
+    --radius: 0.6rem;
+  }
+
+  .dark {
+    --background: 222 47% 6%;
+    --foreground: 222 20% 92%;
+
+    --card: 222 40% 10%;
+    --card-foreground: 222 20% 92%;
+
+    --popover: 222 40% 9%;
+    --popover-foreground: 222 20% 92%;
+
+    --primary: 243 82% 66%;
+    --primary-foreground: 222 47% 8%;
+
+    --secondary: 222 30% 16%;
+    --secondary-foreground: 222 20% 92%;
+
+    --muted: 222 30% 16%;
+    --muted-foreground: 222 12% 62%;
+
+    --accent: 243 60% 20%;
+    --accent-foreground: 243 80% 88%;
+
+    --destructive: 0 63% 45%;
+    --destructive-foreground: 0 0% 100%;
+
+    --border: 222 30% 18%;
+    --input: 222 30% 22%;
+    --ring: 243 82% 66%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground antialiased;
+    font-feature-settings: "rlig" 1, "calt" 1;
+  }
+}
+
+/* React Flow 容器需要显式高度；节点文字在浅色/深色下都清晰 */
+.react-flow__node {
+  font-size: 12px;
+}
+.react-flow__node-paperNode {
+  border-radius: 0.5rem;
+  border: 1px solid hsl(var(--border));
+  background: hsl(var(--card));
+  color: hsl(var(--card-foreground));
+  padding: 0.5rem 0.75rem;
+  max-width: 240px;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+}
+.react-flow__node-gapNode {
+  border-radius: 0.5rem;
+  border: 1px solid hsl(var(--primary) / 0.4);
+  background: hsl(var(--accent));
+  color: hsl(var(--accent-foreground));
+  padding: 0.5rem 0.75rem;
+  max-width: 240px;
+  cursor: pointer;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+}
+.react-flow__node-gapNode.selected {
+  outline: 2px solid hsl(var(--primary));
+}
+.react-flow__handle {
+  width: 6px;
+  height: 6px;
+  background: hsl(var(--muted-foreground));
+}
