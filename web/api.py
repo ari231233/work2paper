@@ -63,10 +63,17 @@ def _load_dossier(project_id: str) -> Dossier:
 
 
 def _commit(dossier: Dossier) -> None:
-    """与编排器一致的落盘：递增版本 -> 写 dossier.json -> 写历史快照（engineering.md §3.1）。"""
+    """与编排器一致的落盘：递增版本 -> 写 dossier.json -> 写历史快照（engineering.md §3.1）。
+
+    M24 v2：模块化重跑（refine/evaluate/retrieve-more）后同步重生成
+    report.md/report.json，保持 run 目录内的两层报告（M23）与最新 dossier 一致。
+    """
     dossier.bump_version()
     dossier.save(dossier._run_dir)
     dossier.snapshot()
+    storage.save_json(dossier._run_dir / "report.json", dossier.to_dict(), "report", 1)
+    (dossier._run_dir / "report.md").write_text(
+        reporting.render_report_md(dossier), encoding="utf-8")
 
 
 def _status_or_none(project_id: str) -> Optional[dict]:

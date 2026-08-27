@@ -230,6 +230,11 @@ class RefineIdeaTest(WebApiTest):
         self.assertEqual(body["idea"]["history"][-1]["action"], "refine")
         # 落盘已更新（版本递增）
         self.assertEqual(Dossier.load(storage.run_dir(run_id)).ideas[0]["claim"], "细化后的创新点")
+        # M24 v2：模块化重跑后同步重生成 report.md/report.json，run 目录内报告与最新 dossier 一致
+        run_dir = storage.run_dir(run_id)
+        self.assertIn("细化后的创新点", (run_dir / "report.md").read_text(encoding="utf-8"))
+        report_json = storage.load_json(run_dir / "report.json", "report")
+        self.assertEqual(report_json["ideas"][0]["claim"], "细化后的创新点")
 
     def test_refine_idea_deterministic_fallback(self):
         run_id = self._save_rich()
