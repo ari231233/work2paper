@@ -15,7 +15,7 @@ def create_app() -> FastAPI:
     """创建 FastAPI 应用实例（薄封装：不承载业务逻辑，只组装路由与中间件）。"""
     app = FastAPI(
         title="PaperMine Web",
-        version="0.1.0",
+        version="0.3.0",
         description="科研决策工作台后端：把 PaperMine Python 核心暴露成 REST API（围绕 Dossier）。",
     )
     # 本地 demo：允许任意来源（M25 Next.js 前端通常在 127.0.0.1:3000）。
