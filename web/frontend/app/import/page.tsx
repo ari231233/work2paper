@@ -8,6 +8,7 @@ import { api } from "@/lib/api";
 import type { ImportRecord } from "@/lib/types";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { ProgressMascot } from "@/components/import/progress-mascot";
 
 function formatBytes(value: number): string {
   if (value < 1024) return `${value} B`;
@@ -22,6 +23,7 @@ export default function ImportPage() {
   const [projectName, setProjectName] = useState("");
   const [record, setRecord] = useState<ImportRecord | null>(null);
   const [phase, setPhase] = useState<"idle" | "uploading" | "analyzing">("idle");
+  const [uploadProgress, setUploadProgress] = useState(0);
   const [error, setError] = useState<string | null>(null);
 
   const excludedSummary = useMemo(() => {
@@ -34,12 +36,13 @@ export default function ImportPage() {
   async function uploadFolder(files: FileList | null) {
     if (!files?.length) return;
     setPhase("uploading");
+    setUploadProgress(0);
     setError(null);
     try {
       const items = Array.from(files);
       const paths = items.map((file) => file.webkitRelativePath || file.name);
       const fallback = paths[0]?.split("/")[0] || "";
-      const result = await api.importFolder(items, paths, projectName || fallback);
+      const result = await api.importFolder(items, paths, projectName || fallback, setUploadProgress);
       setProjectName(result.project_name);
       setRecord(result);
     } catch (err) {
@@ -54,9 +57,14 @@ export default function ImportPage() {
     const file = files?.[0];
     if (!file) return;
     setPhase("uploading");
+    setUploadProgress(0);
     setError(null);
     try {
-      const result = await api.importArchive(file, projectName || file.name.replace(/\.zip$/i, ""));
+      const result = await api.importArchive(
+        file,
+        projectName || file.name.replace(/\.zip$/i, ""),
+        setUploadProgress,
+      );
       setProjectName(result.project_name);
       setRecord(result);
     } catch (err) {
@@ -90,6 +98,10 @@ export default function ImportPage() {
         </p>
       </div>
 
+      {phase !== "idle" ? (
+        <ProgressMascot mode={phase} percent={phase === "uploading" ? uploadProgress : undefined} />
+      ) : null}
+
       <Card>
         <CardHeader>
           <CardTitle>项目名称</CardTitle>
@@ -99,6 +111,7 @@ export default function ImportPage() {
           <input
             value={projectName}
             onChange={(event) => setProjectName(event.target.value)}
+            disabled={phase !== "idle"}
             placeholder="例如：工业设备预测性维护"
             className="h-10 w-full rounded-md border bg-background px-3 text-sm outline-none focus:ring-2 focus:ring-ring"
           />
@@ -204,7 +217,7 @@ export default function ImportPage() {
       )}
 
       {error && !record ? <div className="rounded-lg border border-destructive/30 bg-destructive/5 p-4 text-sm text-destructive">{error}</div> : null}
-      <Button variant="ghost" onClick={() => router.push("/")}>返回科研工作台</Button>
+      <Button variant="ghost" onClick={() => router.push("/")} disabled={phase !== "idle"}>返回科研工作台</Button>
     </div>
   );
 }

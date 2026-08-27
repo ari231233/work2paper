@@ -40,7 +40,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
         : { "Content-Type": "application/json", ...(init?.headers || {}) },
     });
   } catch (err) {
-    throw new ApiError(0, `无法连接后端（${BASE_URL}）。请先运行 \`python -m web\`。`);
+    throw new ApiError(0, `无法连接后端（${BASE_URL}）。请先运行 \`python -m papermine web\`。`);
   }
   if (!res.ok) {
     let detail = "";
@@ -53,6 +53,34 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     throw new ApiError(res.status, detail || `HTTP ${res.status}`);
   }
   return (await res.json()) as T;
+}
+
+function uploadRequest<T>(path: string, body: FormData, onProgress?: (percent: number) => void): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", `${BASE_URL}${path}`);
+    xhr.responseType = "text";
+    xhr.upload.onprogress = (event) => {
+      if (!event.lengthComputable) return;
+      onProgress?.(Math.min(100, Math.round((event.loaded / event.total) * 100)));
+    };
+    xhr.onerror = () => reject(
+      new ApiError(0, `无法连接后端（${BASE_URL}）。请先运行 \`python -m papermine web\`。`),
+    );
+    xhr.onload = () => {
+      const payload = (() => {
+        try { return JSON.parse(xhr.responseText || "{}"); } catch { return {}; }
+      })();
+      if (xhr.status < 200 || xhr.status >= 300) {
+        const detail = typeof payload?.detail === "string" ? payload.detail : `HTTP ${xhr.status}`;
+        reject(new ApiError(xhr.status, detail));
+        return;
+      }
+      onProgress?.(100);
+      resolve(payload as T);
+    };
+    xhr.send(body);
+  });
 }
 
 export const api = {
@@ -82,18 +110,18 @@ export const api = {
   retrieveMore: (id: string, gapId: string) =>
     request<RetrieveMoreResponse>(`/projects/${id}/gaps/${gapId}/retrieve-more`, { method: "POST" }),
 
-  importFolder: (files: File[], paths: string[], projectName?: string) => {
+  importFolder: (files: File[], paths: string[], projectName?: string, onProgress?: (percent: number) => void) => {
     const body = new FormData();
     files.forEach((file) => body.append("files", file, file.name));
     paths.forEach((path) => body.append("paths", path));
     if (projectName?.trim()) body.append("project_name", projectName.trim());
-    return request<ImportRecord>("/imports/folder", { method: "POST", body });
+    return uploadRequest<ImportRecord>("/imports/folder", body, onProgress);
   },
-  importArchive: (file: File, projectName?: string) => {
+  importArchive: (file: File, projectName?: string, onProgress?: (percent: number) => void) => {
     const body = new FormData();
     body.append("file", file, file.name);
     if (projectName?.trim()) body.append("project_name", projectName.trim());
-    return request<ImportRecord>("/imports/archive", { method: "POST", body });
+    return uploadRequest<ImportRecord>("/imports/archive", body, onProgress);
   },
   getImport: (id: string) => request<ImportRecord>(`/imports/${id}`),
   analyzeImport: (id: string) =>

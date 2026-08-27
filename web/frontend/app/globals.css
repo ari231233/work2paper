@@ -160,3 +160,64 @@
   height: 6px;
   background: hsl(var(--muted-foreground));
 }
+
+/* M27 上传/分析反馈：Q 版科研助手随真实上传进度移动；分析阶段往返巡游。 */
+.mascot-progress {
+  position: relative;
+  height: 5.25rem;
+  padding-top: 3.9rem;
+}
+.mascot-track {
+  height: 0.7rem;
+  overflow: hidden;
+  border-radius: 9999px;
+  background: hsl(var(--muted));
+  box-shadow: inset 0 1px 2px rgb(15 23 42 / 0.08);
+}
+.mascot-fill {
+  height: 100%;
+  width: calc(var(--mascot-progress) * 100%);
+  border-radius: inherit;
+  background: linear-gradient(90deg, hsl(var(--primary)), hsl(190 90% 52%));
+  transition: width 220ms ease-out;
+}
+.mascot-runner {
+  position: absolute;
+  bottom: 0.35rem;
+  left: calc((100% - 4.5rem) * var(--mascot-progress));
+  height: 4.5rem;
+  width: 4.5rem;
+  transition: left 220ms ease-out;
+  filter: drop-shadow(0 6px 6px rgb(49 46 129 / 0.18));
+}
+.mascot-dance {
+  transform-origin: 50% 100%;
+  animation: mascot-dance 650ms ease-in-out infinite alternate;
+}
+.mascot-progress.is-indeterminate .mascot-fill {
+  width: 36%;
+  animation: mascot-fill-roam 2.6s ease-in-out infinite alternate;
+}
+.mascot-progress.is-indeterminate .mascot-runner {
+  left: 0;
+  animation: mascot-runner-roam 2.6s ease-in-out infinite alternate;
+}
+@keyframes mascot-dance {
+  from { transform: translateY(1px) rotate(-4deg) scale(0.98); }
+  to { transform: translateY(-7px) rotate(4deg) scale(1.02); }
+}
+@keyframes mascot-runner-roam {
+  from { left: 0; }
+  to { left: calc(100% - 4.5rem); }
+}
+@keyframes mascot-fill-roam {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(278%); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .mascot-dance,
+  .mascot-progress.is-indeterminate .mascot-fill,
+  .mascot-progress.is-indeterminate .mascot-runner {
+    animation-duration: 5s;
+  }
+}
