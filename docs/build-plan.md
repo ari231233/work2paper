@@ -602,6 +602,64 @@ F. Human Decisions
 - **要点**：UI 用产品语言（文献/创新点/路线图），**不用 M1-M16 内部命名**；右下角固定「Ask PaperMine」contextual 入口 + 快捷按钮。
 - **验收**：演示路径跑通（打开项目 → Overview 推荐 → Ideas 候选 → i5 详情 → Evidence → Roadmap 6 周计划）；页面数据来自 M24 的 API。
 
+### M25 v2 — Web 前端打磨 · 第一轮（决策语义 / 顶栏 / 状态 / 证据图）【第一优先】
+
+> 背景：M25 首版经产品 review（7/10）后第一轮优先修 4 项 P0。全部为前端改动（`web/frontend/`），不改 M24 后端 schema。各子项文件互不重叠，可并行开框。
+
+#### M25 v2.1 顶栏重构（真正的项目名称）
+
+- **现状**：`components/layout/topbar.tsx` 用整段 `assets.narrative` 当一级标题，截断、视觉权重过大。
+- **目标**：① 第一行=项目短名（前端从 narrative 派生：取首句/截断，不新增后端字段）；② 第二行=≤50 字摘要；③ run_id/backend/version/DONE 移入次级信息区（弱化）；④ 完整叙事移入 Overview「项目理解」区。
+- **产出**：改 `topbar.tsx` + `lib/utils.ts` 名称派生 + Overview 增「项目理解」区块。
+- **验收**：顶栏显示短名+摘要，run_id 等弱化；Overview 可读完整叙事；`npm run build` 通过。
+
+#### M25 v2.2 全局项目状态闪回修复
+
+- **根因**：`AppShell` 用 `loading ? 骨架 : children` 整页挡内容，`Topbar` 空态显示「无可用项目/未命名项目」；首次 6 个并行请求未 resolve 期间任何导航都落到该空态窗口。
+- **目标**：① 二次加载（`selectProject`/`refresh`）不把 `loading` 置真、不清空已有 dossier/ideas，沿用旧数据静默刷新；② 区分「首次加载」（允许骨架）与「重新验证」（保留旧数据）；③ `loadProject` 加请求版本号（`useRef` 自增），过期响应丢弃，避免慢旧响应覆盖新选择。
+- **产出**：改 `hooks/use-project.tsx`（核心）+ 视需要微调 `components/layout/app-shell.tsx`。
+- **验收**：首载后快速切换 Overview→Ideas→Idea Detail→Roadmap 无闪回；切项目时旧内容不被慢响应覆盖。
+
+#### M25 v2.3 统一决策语义 + 决策状态层（前端 derive.ts）
+
+- **现状**：同一 idea 同时出现「Recommended/可改进/两星/Weak Reject/Evidence 弱/Risk 高」，语义冲突。
+- **目标**：在 `lib/derive.ts` 建立三层决策状态（**判定规则放前端，不动后端 schema**）——① 首选探索方向（候选相对最好，尚未过门槛）；② 建议实施（证据+可行性达标）；③ 暂不建议（需补证据/换方向）。派生依据=现有 `verdict`+`evidence_validation.evidence`+`data_feasibility`+相对排名（`selectedPair`）。**禁止**同时出现「Recommended」与「Weak Reject」；`Weak Reject`→用户语言「证据不足，暂不通过」。
+- **产出**：改 `lib/derive.ts` + 所有渲染推荐标签的组件（overview 大卡 / ideas 卡 / idea-detail 头部）。
+- **验收**：任一 idea 全站只呈现一种决策状态 + 一处相对排名；「首选探索方向｜尚未通过证据门槛」可正常展示；`npm run build` 通过。
+
+#### M25 v2.4 Evidence Graph 默认视图重做
+
+- **现状**：Fit View 下节点过小不可读；右侧证据面板空；首屏信息量低。
+- **目标**：① 默认按 Query 分组，只显示论文簇/Gap/关系数量；② 点 Query 展开其论文；③ 节点短标题，完整标题进 Tooltip/右侧详情；④ 默认选中推荐 idea 对应 gap；⑤ 右侧面板首屏直接展示关键 gap，不留空；⑥ 加图例（论文/Gap/强弱证据/关联方向）；⑦ 「补充文献」放进 Gap 详情。
+- **产出**：改 `components/literature/evidence-graph.tsx`（+ `landscape.tsx` 与 gap 详情面板）。
+- **验收**：首屏可见图例+关键 gap 摘要；点 Query 展开论文；点 Gap 右侧有内容且含「补充文献」。
+
+### M25 v3 — Web 前端打磨 · 第二轮（视觉体系 / 卡片精简 / Ask PaperMine / 交互细节）【第二优先】
+
+> 依赖 M25 v2（决策状态层先行，v3 在其上做视觉与交互收敛）。
+
+#### M25 v3.1 中英文 + 颜色体系统一
+
+- 正文用中文，英文仅作术语辅助（论文契合度/证据强度/可行性/创新程度/评审风险；`Weak Reject`→「证据不足，暂不通过」）。
+- 固定色彩规则：绿=满足/通过，蓝紫=中性/选中，黄=需补充，红=明确阻塞/高风险，灰=未知/无证据/不可计算。「弱证据」用黄；仅「证据冲突/结论不可用」用红。
+- **产出**：全局文案 + 主题 token（`globals.css` / tailwind 配置）。
+
+#### M25 v3.2 Overview + Ideas 卡片精简
+
+- Overview 首屏只保留：当前判断 / 为什么 / 最大阻塞 / 下一步动作；Why/Risk/RQ 下移或折叠。
+- Ideas 候选卡只保留 3 首要指标（论文契合度/证据强度/工作量）；Novelty/Feasibility 移次级或 hover。
+- **产出**：`components/overview/*`、`components/ideas/*`。
+
+#### M25 v3.3 Ask PaperMine 定位（改名 vs 输入框）
+
+- 二选一：加自由输入框+对话记录；或改名「研究助手/优化当前 Idea」并保留快捷操作。若保留 Ask PaperMine 名，必须加输入框。
+- **产出**：`components/layout/ask-papermine.tsx`。
+
+#### M25 v3.4 P2 交互细节收尾
+
+- 刷新按钮加 Tooltip + 刷新后时间反馈；项目选择器显示「项目名+日期」，run_id 移次级；Ideas 排序改中文并显示排序依据；Idea Detail Tab 栏滚动吸顶；Roadmap 实验矩阵默认展开 E1 其余折叠；Kanban 任务=本地视觉态 + 明确「未持久化」提示（写回项目进度走 M24 v2，后续）；错误提示产品化「服务暂时不可用」，技术细节收进「查看详情」。
+- **产出**：分散于 topbar / ideas / idea-detail / roadmap / app-shell / error 组件。
+
 ---
 
 ## 5. 全部完成后的集成收尾（一个框或本框）
