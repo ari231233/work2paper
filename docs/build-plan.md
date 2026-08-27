@@ -660,6 +660,72 @@ F. Human Decisions
 - 刷新按钮加 Tooltip + 刷新后时间反馈；项目选择器显示「项目名+日期」，run_id 移次级；Ideas 排序改中文并显示排序依据；Idea Detail Tab 栏滚动吸顶；Roadmap 实验矩阵默认展开 E1 其余折叠；Kanban 任务=本地视觉态 + 明确「未持久化」提示（写回项目进度走 M24 v2，后续）；错误提示产品化「服务暂时不可用」，技术细节收进「查看详情」。
 - **产出**：分散于 topbar / ideas / idea-detail / roadmap / app-shell / error 组件。
 
+### M26 — Web 本地分发与统一启动【第一优先】
+
+- **目标**：把 Web Demo 收敛为 GitHub 用户可独立启动的本地应用，以一个命令管理 FastAPI + Next.js 生产服务，并自动打开浏览器。
+- **前置**：M24/M25 + Web 前端生产构建已通过。
+- **产出**：`papermine web` CLI 子命令 + 启动器模块 + 安装/运行文档 + 单测。
+- **冻结接口**：
+  ```text
+  papermine web [--host 127.0.0.1] [--api-port 8000] [--web-port 3000]
+                [--no-browser] [--dev]
+  ```
+- **约束**：
+  1. 默认仅监听 `127.0.0.1`，不向局域网/公网暴露用户项目。
+  2. 默认启动前端生产服务；`--dev` 仅供开发者使用。
+  3. 启动前检查 Node/npm、前端依赖与构建产物；错误使用用户可读提示。
+  4. `Ctrl+C` 同时关闭前后端子进程，不遗留孤儿进程。
+  5. 不改变核心引擎、Dossier 或 Orchestrator 冻结接口。
+- **验收**：`papermine web --no-browser` 能启动两个服务；缺 Node/未构建时提示明确；CLI 单测和前端生产构建通过。
+
+### M27 — Web 项目导入（文件夹 + ZIP）【第一优先】
+
+- **目标**：用户在本地 Web 中选择项目文件夹或 ZIP，先安全复制到 papermine 私有数据目录并预览，再由用户确认启动分析；原项目永不修改。
+- **前置**：M24（API）+ M25（前端）+ M26（本地启动）。
+- **新增 Web 可选依赖**：`python-multipart`（已由主控聊天确认，仅用于 FastAPI 文件上传解析；核心依赖仍只有 httpx）。
+- **冻结数据目录**：
+  ```text
+  ~/.papermine/imports/<import_id>/
+  ├── source/       # 项目副本
+  └── import.json   # import_record schema v1
+  ```
+  一个 import 可产生多次 run；`imports/` 与 `runs/` 分离。
+- **冻结接口**：
+  ```text
+  POST /imports/folder              multipart: files[] + paths[] + project_name?
+  POST /imports/archive             multipart: file(.zip) + project_name?
+  GET  /imports/{import_id}         返回导入预览
+  POST /imports/{import_id}/analyze body: {auto: true}
+  ```
+- **冻结 import_record v1 字段**：
+  ```json
+  {
+    "import_id": "import_...",
+    "project_id": "project_...",
+    "project_name": "...",
+    "source_type": "folder | zip",
+    "file_count": 0,
+    "total_size": 0,
+    "included_files": [],
+    "excluded_files": [],
+    "warnings": [],
+    "status": "ready | analyzing | done | failed",
+    "source_dir": "...",
+    "run_id": null,
+    "created_at": "...",
+    "updated_at": "..."
+  }
+  ```
+- **安全硬约束**：
+  1. 阻止绝对路径、`..`、ZIP Slip、符号链接与 ZIP Bomb。
+  2. 默认排除 `.git/node_modules/.venv/venv/__pycache__/.next/dist/build/coverage/.idea/.vscode`。
+  3. 默认排除 `.env/*.pem/*.key/credentials.json/id_rsa` 并在预览中提示。
+  4. 默认限制：单文件 20 MiB、项目 500 MiB、10,000 文件；超限返回 413。
+  5. 导入只写 `~/.papermine/imports/`，不修改用户原目录；分析前必须先返回预览，由用户显式确认。
+- **前端流程**：`新建分析 → 文件夹/ZIP → 上传进度 → 导入预览 → 开始分析 → 进入 Overview`。
+- **降级路径**：无 LLM key / 网络失败沿用 Orchestrator 确定性降级；导入失败保留可读错误，不创建 run。
+- **验收**：文件夹层级保留；ZIP 正常解压；恶意路径/敏感文件/超限被拦截或排除；确认后能创建 run；后端测试、全量 pytest、前端 build、旧版冒烟和 trace 基线均通过。
+
 ---
 
 ## 5. 全部完成后的集成收尾（一个框或本框）
