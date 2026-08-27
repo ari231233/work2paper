@@ -156,7 +156,7 @@ export function AskPaperMine() {
                       title: "已补充文献（retrieve-more）",
                       lines: [
                         `gap ${r.gap?.gap_id ?? firstGapId} 新增 ${r.added_papers?.length ?? 0} 篇`,
-                        ...(r.added_papers ?? []).map((t) => `· ${clip(t, 80)}`),
+                        ...(r.added_papers ?? []).map((t: string) => `· ${clip(t, 80)}`),
                       ],
                     }))
                   }
