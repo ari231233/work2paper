@@ -65,14 +65,17 @@ npm --version
 
 ### 2. 下载 papermine
 
-在 PowerShell 中执行：
+本教程把 papermine 固定安装到 `D:\papermine`，避免把项目代码、Python 虚拟环境和网页依赖放在系统 C 盘。如果希望使用 E 盘、F 盘等其他磁盘，把下面路径开头的大写盘符 `D` 改成对应盘符即可，例如把 `D:\papermine` 改成 `E:\papermine`。
+
+请先确认电脑存在 D 盘，然后在 PowerShell 中执行：
 
 ```powershell
+Set-Location D:\
 git clone https://github.com/ari231233/work2paper.git papermine
-cd papermine
+Set-Location D:\papermine
 ```
 
-第一条命令会把项目下载到当前目录下的 `papermine` 文件夹，第二条命令会进入该文件夹。以后执行 papermine 命令前，也需要先进入这个文件夹。
+执行后，项目会固定保存在 `D:\papermine`。以后执行 papermine 命令前，也需要先进入这个文件夹。
 
 ### 3. 创建独立的 Python 环境
 
@@ -84,6 +87,15 @@ python -m venv .venv
 ```
 
 成功后，PowerShell 命令行开头通常会出现 `(.venv)`。这个独立环境可以避免 papermine 的依赖影响电脑上的其他 Python 项目。
+
+接着把 papermine 的导入副本、分析结果、经验和缓存固定保存到 `D:\papermine-data`：
+
+```powershell
+[Environment]::SetEnvironmentVariable("PAPERMINE_HOME", "D:\papermine-data", "User")
+$env:PAPERMINE_HOME = "D:\papermine-data"
+```
+
+第一条命令永久记录数据目录，第二条命令让设置在当前 PowerShell 窗口立即生效。以后新开的 PowerShell 会自动使用该目录。如果改用其他磁盘，请同样修改这两处路径开头的盘符。
 
 如果 PowerShell 提示“禁止运行脚本”，先执行下面这条命令，只为当前 PowerShell 窗口临时允许脚本运行，然后再次激活：
 
@@ -180,7 +192,9 @@ python -m papermine web
 5. 分析期间不要关闭网页或启动 Web 的 PowerShell 窗口。
 6. 分析结束后会自动进入项目概览，可继续查看创新点、文献证据和论文路线图。
 
-导入时会把项目副本保存到 `%USERPROFILE%\.papermine\imports\`，分析结果保存到 `%USERPROFILE%\.papermine\runs\`。papermine 不会修改用户选择的原始项目目录。敏感文件和常见依赖目录会默认排除。
+按照本教程安装后，导入项目副本保存在 `D:\papermine-data\imports\`，分析结果保存在 `D:\papermine-data\runs\`。papermine 不会修改用户选择的原始项目目录。敏感文件和常见依赖目录会默认排除。
+
+> 说明：本教程保证 papermine 的项目代码、虚拟环境、网页依赖和主要运行数据位于 D 盘。Git、Python、Node.js 本身以及 pip/npm 的全局缓存仍可能按各自安装程序的默认设置使用少量 C 盘空间。
 
 ### 8. 关闭 Web 客户端
 
@@ -188,25 +202,22 @@ python -m papermine web
 
 ### 9. 以后再次打开（日常启动）
 
-打开新的 PowerShell，进入第一次下载的项目目录，然后执行：
+打开新的 PowerShell，执行：
 
 ```powershell
-cd papermine
+Set-Location D:\papermine
 .\.venv\Scripts\Activate.ps1
 papermine web
 ```
 
-如果你的 PowerShell 当前所在位置不是 `papermine` 的上级目录，请把第一条命令改成实际的完整路径，例如：
-
-```powershell
-cd "D:\你的文件夹\papermine"
-```
+如果最初选择了其他磁盘，把第一条命令开头的 `D` 改成实际盘符。
 
 ### 10. 更新到 GitHub 最新版本
 
-先关闭正在运行的 Web 客户端，再在仓库根目录执行：
+先关闭正在运行的 Web 客户端，再执行：
 
 ```powershell
+Set-Location D:\papermine
 git pull origin main
 .\.venv\Scripts\Activate.ps1
 python -m pip install -e ".[web]"
@@ -227,6 +238,7 @@ papermine web
 - **端口 3000 或 8000 被占用**：使用 `papermine web --api-port 8100 --web-port 3100`，然后访问 <http://127.0.0.1:3100>。
 - **没有 API Key**：程序仍能运行，并自动使用确定性降级模式；这不是安装失败。
 - **配置了 Key 但分析失败**：检查 `.env` 中的 Key、网络连接、DeepSeek 账户余额以及代理设置，然后重新分析。
+- **D 盘不存在或想安装到其他盘**：把教程命令中路径开头的 `D` 统一改成已有盘符，例如 `E`；不要改路径中的其他内容。
 - **想禁止自动打开浏览器**：使用 `papermine web --no-browser`。
 
 默认情况下服务只监听 `127.0.0.1`，不会向局域网或公网开放。
