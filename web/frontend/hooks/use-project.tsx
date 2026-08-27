@@ -44,7 +44,7 @@ interface ProjectContextValue {
   /** 重新验证中（保留旧数据，静默刷新，仅用于刷新按钮等轻量反馈） */
   refreshing: boolean;
   error: string | null;
-  /** 当前正在执行的操作（Ask PaperMine 快捷按钮反馈用） */
+  /** 当前正在执行的操作（研究助手快捷按钮反馈用） */
   action: ActionKind | null;
   selectProject: (id: string) => Promise<void>;
   refresh: () => Promise<void>;

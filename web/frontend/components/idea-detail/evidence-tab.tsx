@@ -13,10 +13,11 @@ const CHECK_LABELS: Record<string, string> = {
   claim_strength: "claim 强度校准",
 };
 
-const STATUS_BADGE: Record<string, "success" | "warning" | "destructive"> = {
+// 固定色彩规则（M25 v3.1）：到位=绿，需补强=黄，缺失=灰（无证据），不把「缺失」当红。
+const STATUS_BADGE: Record<string, "success" | "warning" | "outline"> = {
   ok: "success",
   concern: "warning",
-  missing: "destructive",
+  missing: "outline",
 };
 
 function CalibrationBlock({ evaluation }: { evaluation: Evaluation }) {
@@ -69,7 +70,7 @@ export function EvidenceTab({ evaluation }: { evaluation?: Evaluation | null }) 
         <h4 className="mb-2 text-sm font-semibold">证据强度（Evidence）</h4>
         <div className="rounded-lg border p-3">
           <div className="flex items-center gap-2">
-            <Badge variant={evv?.evidence === "strong" ? "success" : evv?.evidence === "medium" ? "warning" : "destructive"}>
+            <Badge variant={evv?.evidence === "strong" ? "success" : evv?.evidence === "medium" || evv?.evidence === "weak" ? "warning" : "outline"}>
               {evidenceLabel(evv?.evidence as never)}
             </Badge>
             <span className="text-sm">{clean(evv?.reason)}</span>
@@ -98,7 +99,7 @@ export function EvidenceTab({ evaluation }: { evaluation?: Evaluation | null }) 
       {/* M11 多维 novelty */}
       {dims && Object.keys(dims).length ? (
         <section>
-          <h4 className="mb-2 text-sm font-semibold">Novelty 分维度（各 0~5，加权合成 {num(evaluation.novelty_score)}）</h4>
+          <h4 className="mb-2 text-sm font-semibold">创新程度分维度（各 0~5，加权合成 {num(evaluation.novelty_score)}）</h4>
           <div className="grid gap-2 sm:grid-cols-2">
             {Object.entries(dims).map(([k, d]) => (
               <div key={k} className="rounded-lg border p-2.5 text-xs">

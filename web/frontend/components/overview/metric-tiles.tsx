@@ -8,11 +8,12 @@ import { Progress } from "@/components/ui/progress";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 
+// 固定色彩规则（M25 v3.1）：绿=满足/通过，黄=需补充，红=明确阻塞/高风险，灰=未知/无证据。
 const TONE_BAR: Record<MetricTone, string> = {
-  good: "bg-emerald-500",
-  warn: "bg-amber-500",
-  bad: "bg-red-500",
-  neutral: "bg-slate-400",
+  good: "bg-success",
+  warn: "bg-warning",
+  bad: "bg-danger",
+  neutral: "bg-neutral",
 };
 
 const TONE_TEXT: Record<MetricTone, string> = {

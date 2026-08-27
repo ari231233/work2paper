@@ -223,11 +223,15 @@ export function computeMetrics(
   const novelty = ev?.novelty_score;
   const risks = riskItems(roadmap, ev);
 
-  const evVal = evidence === "strong" ? 88 : evidence === "medium" ? 62 : 30;
-  const evTone: MetricTone = evidence === "strong" ? "good" : evidence === "medium" ? "warn" : "bad";
+  const evVal = evidence === "strong" ? 88 : evidence === "medium" ? 62 : evidence === "weak" ? 35 : 0;
+  // 「弱证据」用黄（需补充），不用红；未评估用灰（未知/无证据）。
+  const evTone: MetricTone =
+    evidence === "strong" ? "good" : evidence === "medium" || evidence === "weak" ? "warn" : "neutral";
 
-  const feasVal = feas === "high" ? 85 : feas === "medium" ? 55 : 25;
-  const feasTone: MetricTone = feas === "high" ? "good" : feas === "medium" ? "warn" : "bad";
+  const feasVal = feas === "high" ? 85 : feas === "medium" ? 55 : feas === "low" ? 35 : 0;
+  // 数据可得性低 = 需补充（黄），不视作明确阻塞；未评估 = 灰。
+  const feasTone: MetricTone =
+    feas === "high" ? "good" : feas === "medium" || feas === "low" ? "warn" : "neutral";
 
   const novVal = numValue(novelty);
   const novTone: MetricTone = novVal >= 70 ? "good" : novVal >= 60 ? "warn" : "neutral";
@@ -244,7 +248,7 @@ export function computeMetrics(
   return {
     thesisFit: {
       key: "thesisFit",
-      label: "Thesis Fit",
+      label: "论文契合度",
       value: thesisFit,
       display: String(thesisFit),
       level: thesisFit >= 70 ? "契合度高" : thesisFit >= 50 ? "契合度中" : "契合度低",
@@ -254,16 +258,16 @@ export function computeMetrics(
     },
     evidence: {
       key: "evidence",
-      label: "Evidence",
+      label: "证据强度",
       value: evVal,
       display: evidenceLabel(evidence as never),
       level: evidence ? `${evidenceLabel(evidence as never)}证据` : "未评估",
       tone: evTone,
-      detail: clip(ev?.evidence_validation?.reason, 120) || "证据强度（M12 四维审查）",
+      detail: clip(ev?.evidence_validation?.reason, 120) || "证据强度（四维审查）",
     },
     feasibility: {
       key: "feasibility",
-      label: "Feasibility",
+      label: "可行性",
       value: feasVal,
       display: feasibilityLabel(feas as never),
       level: `数据可得性${feasibilityLabel(feas as never)}`,
@@ -272,7 +276,7 @@ export function computeMetrics(
     },
     novelty: {
       key: "novelty",
-      label: "Novelty",
+      label: "创新程度",
       value: novVal,
       display: num(novelty),
       level: ev?.novelty_band ? noveltyBandLabel(ev.novelty_band) : "未评估",
@@ -281,7 +285,7 @@ export function computeMetrics(
     },
     risk: {
       key: "risk",
-      label: "Risk",
+      label: "评审风险",
       value: riskVal,
       display: riskVal >= 65 ? "高" : riskVal >= 40 ? "中" : "低",
       level: `${risks.length} 条风险分支`,

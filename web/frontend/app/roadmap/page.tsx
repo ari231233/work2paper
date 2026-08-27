@@ -18,7 +18,7 @@ export default function RoadmapPage() {
   return (
     <div className="space-y-5 p-6">
       <div className="flex flex-wrap items-center gap-2">
-        <h2 className="text-lg font-semibold">Roadmap（论文路线图）</h2>
+        <h2 className="text-lg font-semibold">论文路线图（Roadmap）</h2>
         <Badge variant="outline">{clean(roadmap?.paper_type) || "论文类型待定"}</Badge>
         {roadmap?.selected_idea && (
           <Badge variant="accent">
@@ -29,7 +29,7 @@ export default function RoadmapPage() {
 
       <Card>
         <CardHeader className="pb-2">
-          <CardTitle className="text-base">Paper Story（论文主线）</CardTitle>
+          <CardTitle className="text-base">论文主线（Paper Story）</CardTitle>
         </CardHeader>
         <CardContent>
           <PaperStory story={roadmap?.core_story} />
@@ -38,7 +38,7 @@ export default function RoadmapPage() {
 
       <Card>
         <CardHeader className="pb-2">
-          <CardTitle className="text-base">Research Questions</CardTitle>
+          <CardTitle className="text-base">研究问题（Research Questions）</CardTitle>
         </CardHeader>
         <CardContent>
           <ResearchQuestions questions={roadmap?.research_questions} />
@@ -47,7 +47,7 @@ export default function RoadmapPage() {
 
       <Card>
         <CardHeader className="pb-2">
-          <CardTitle className="text-base">Experiment Matrix（可展开）</CardTitle>
+          <CardTitle className="text-base">实验矩阵（Experiment Matrix，可展开）</CardTitle>
         </CardHeader>
         <CardContent>
           <ExperimentMatrix experiments={roadmap?.experiment_matrix} />
@@ -56,7 +56,7 @@ export default function RoadmapPage() {
 
       <Card>
         <CardHeader className="pb-2">
-          <CardTitle className="text-base">Timeline（Kanban）</CardTitle>
+          <CardTitle className="text-base">时间线（Timeline / Kanban）</CardTitle>
         </CardHeader>
         <CardContent>
           <KanbanTimeline stages={roadmap?.stage_exits} />

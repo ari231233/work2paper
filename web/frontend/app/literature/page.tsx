@@ -12,19 +12,19 @@ export default function LiteraturePage() {
   return (
     <div className="space-y-6 p-6">
       <div>
-        <h2 className="text-lg font-semibold">Literature &amp; Gap</h2>
+        <h2 className="text-lg font-semibold">文献与证据（Literature &amp; Gap）</h2>
         <p className="text-sm text-muted-foreground">{evidenceCoverage(dossier?.literature)}</p>
       </div>
 
       <section>
-        <h3 className="mb-3 text-sm font-semibold">Evidence Graph（点击 gap 展开证据）</h3>
+        <h3 className="mb-3 text-sm font-semibold">证据图（Evidence Graph，点击 gap 展开证据）</h3>
         <EvidenceGraph />
       </section>
 
       <Separator />
 
       <section>
-        <h3 className="mb-3 text-sm font-semibold">Research Landscape（论文卡片）</h3>
+        <h3 className="mb-3 text-sm font-semibold">研究图景（Research Landscape，论文卡片）</h3>
         <Landscape />
       </section>
     </div>

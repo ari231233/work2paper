@@ -14,12 +14,13 @@ import {
 } from "lucide-react";
 
 import { useProject } from "@/hooks/use-project";
-import { selectedPair, whyThis } from "@/lib/derive";
+import { decisionFor, selectedPair, whyThis } from "@/lib/derive";
+import { evidenceLabel, noveltyBandLabel, VERDICT_LABELS } from "@/lib/format";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
-import { clean, clip } from "@/lib/utils";
-import type { Idea, Evaluation } from "@/lib/types";
+import { clean, clip, projectName, projectSummary } from "@/lib/utils";
+import type { Idea, Evaluation, Verdict } from "@/lib/types";
 
 interface AskResult {
   title: string;
@@ -27,6 +28,11 @@ interface AskResult {
   tone?: "default" | "warning";
 }
 
+/**
+ * 「研究助手」（M25 v3.3 改名，原 Ask PaperMine）：
+ * 保留快捷操作（映射到 M24 模块化重跑端点），不做伪对话——后端无自由对话端点。
+ * 定位：优化当前 Idea / 重新评估 / 补充文献 / 挑战 / 生成实验。
+ */
 export function AskPaperMine() {
   const { dossier, ideas, gaps, roadmap, action, refineIdea, evaluateIdea, retrieveMore } =
     useProject();
@@ -48,6 +54,7 @@ export function AskPaperMine() {
 
   const currentIdeaId = current.idea?.idea_id;
   const firstGapId = current.idea?.gap_refs?.[0] || gaps[0]?.gap_id || null;
+  const decision = decisionFor(dossier, currentIdeaId);
 
   async function run(title: string, fn: () => Promise<unknown>, map: (r: any) => AskResult) {
     setResult(null);
@@ -55,7 +62,11 @@ export function AskPaperMine() {
       const r = await fn();
       setResult(map(r));
     } catch (err) {
-      setResult({ title: "操作失败", lines: [err instanceof Error ? err.message : String(err)], tone: "warning" });
+      setResult({
+        title: "操作失败",
+        lines: ["服务暂时不可用，请稍后重试。"],
+        tone: "warning",
+      });
     }
   }
 
@@ -69,7 +80,7 @@ export function AskPaperMine() {
         className="fixed bottom-5 right-5 z-40 flex items-center gap-2 rounded-full bg-primary px-4 py-3 text-sm font-medium text-primary-foreground shadow-lg transition-transform hover:scale-105"
       >
         {open ? <X className="h-4 w-4" /> : <Bot className="h-4 w-4" />}
-        Ask PaperMine
+        研究助手
       </button>
 
       {open && (
@@ -79,7 +90,8 @@ export function AskPaperMine() {
             <div className="flex items-center justify-between border-b px-4 py-3">
               <div className="flex items-center gap-2">
                 <Sparkles className="h-4 w-4 text-primary" />
-                <span className="text-sm font-semibold">Ask PaperMine</span>
+                <span className="text-sm font-semibold">研究助手</span>
+                <span className="text-xs text-muted-foreground">优化当前 Idea</span>
               </div>
               <Button variant="ghost" size="icon" onClick={() => setOpen(false)}>
                 <X className="h-4 w-4" />
@@ -90,7 +102,12 @@ export function AskPaperMine() {
               {/* 上下文 */}
               <section className="space-y-1.5 text-xs text-muted-foreground">
                 <div className="font-medium text-foreground">上下文（自动携带）</div>
-                <div>项目：{clean(dossier?.assets?.narrative) || "（未命名）"}</div>
+                <div>
+                  项目：{projectName(dossier?.assets?.narrative) || "（未命名）"}
+                  {projectSummary(dossier?.assets?.narrative)
+                    ? ` · ${projectSummary(dossier?.assets?.narrative)}`
+                    : ""}
+                </div>
                 <div>当前 Idea：{currentIdeaId ? <code>{currentIdeaId}</code> : "（无）"}</div>
                 {current.idea && <div>主张：{clip(current.idea.claim, 80)}</div>}
                 {current.idea?.literature_refs?.length ? (
@@ -99,11 +116,7 @@ export function AskPaperMine() {
                 {current.idea?.gap_refs?.length ? (
                   <div>来源 gap：{current.idea.gap_refs.join("、")}</div>
                 ) : null}
-                {current.evaluation ? (
-                  <div>
-                    评估：verdict={current.evaluation.verdict} · novelty={current.evaluation.novelty_score}
-                  </div>
-                ) : null}
+                {decision && <div>当前判断：{decision.summary}</div>}
               </section>
 
               <Separator />
@@ -115,18 +128,18 @@ export function AskPaperMine() {
                   size="sm"
                   disabled={!currentIdeaId || busy}
                   onClick={() =>
-                    run("强化这个 Idea", () => refineIdea(currentIdeaId!), (r) => ({
-                      title: "已强化（refine）",
+                    run("优化当前 Idea", () => refineIdea(currentIdeaId!), (r) => ({
+                      title: "已优化当前 Idea",
                       lines: [
-                        `claim：${clip(r.idea.claim, 120)}`,
-                        `hypothesis：${clip(r.idea.novelty_hypothesis, 120)}`,
+                        `主张：${clip(r.idea.claim, 120)}`,
+                        `假设：${clip(r.idea.novelty_hypothesis, 120)}`,
                         r.degraded ? "（离线确定性降级，低置信）" : "",
                       ].filter(Boolean),
                       tone: r.degraded ? "warning" : "default",
                     }))
                   }
                 >
-                  <Sparkles className="h-4 w-4" /> 强化这个 Idea
+                  <Sparkles className="h-4 w-4" /> 优化当前 Idea
                 </Button>
 
                 <Button
@@ -134,17 +147,17 @@ export function AskPaperMine() {
                   size="sm"
                   disabled={!currentIdeaId || busy}
                   onClick={() =>
-                    run("重新评分", () => evaluateIdea(currentIdeaId!), (r) => ({
-                      title: "已重新评分（evaluate）",
+                    run("重新评估", () => evaluateIdea(currentIdeaId!), (r) => ({
+                      title: "已重新评估",
                       lines: [
-                        `novelty=${r.evaluation.novelty_score}（${r.evaluation.novelty_band}）`,
-                        `verdict=${r.evaluation.verdict} · 证据=${r.evaluation.evidence_validation?.evidence}`,
-                        r.evaluation.rework_reason ? `回炉原因：${r.evaluation.rework_reason}` : "",
+                        `创新程度 ${r.evaluation.novelty_score}（${noveltyBandLabel(r.evaluation.novelty_band)}）`,
+                        `建议：${VERDICT_LABELS[r.evaluation.verdict as Verdict] ?? r.evaluation.verdict} · 证据强度 ${evidenceLabel(r.evaluation.evidence_validation?.evidence)}`,
+                        r.evaluation.rework_reason ? `回炉原因：${clip(r.evaluation.rework_reason, 80)}` : "",
                       ].filter(Boolean),
                     }))
                   }
                 >
-                  <RefreshCcw className="h-4 w-4" /> 重新评分
+                  <RefreshCcw className="h-4 w-4" /> 重新评估
                 </Button>
 
                 <Button
@@ -153,7 +166,7 @@ export function AskPaperMine() {
                   disabled={!firstGapId || busy}
                   onClick={() =>
                     run("补充文献", () => retrieveMore(firstGapId!), (r) => ({
-                      title: "已补充文献（retrieve-more）",
+                      title: "已补充文献",
                       lines: [
                         `gap ${r.gap?.gap_id ?? firstGapId} 新增 ${r.added_papers?.length ?? 0} 篇`,
                         ...(r.added_papers ?? []).map((t: string) => `· ${clip(t, 80)}`),
@@ -226,7 +239,7 @@ export function AskPaperMine() {
             </div>
 
             <div className="border-t px-4 py-2 text-[11px] text-muted-foreground">
-              操作走模块化重跑端点（refine / evaluate / retrieve-more），只重跑受影响环节，不整条 Pipeline 重跑。
+              操作走模块化重跑（优化 / 重新评估 / 补充文献），只重跑受影响环节，不整条 Pipeline 重跑。
             </div>
           </div>
         </>

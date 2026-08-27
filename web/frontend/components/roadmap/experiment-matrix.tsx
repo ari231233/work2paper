@@ -17,7 +17,7 @@ function Row({ label, value }: { label: string; value: string }) {
   );
 }
 
-/** Experiment Matrix（可展开）：实验 / 目的 / 自变量 / 对比模型 / 指标 / 对应 RQ。 */
+/** Experiment Matrix（可展开，默认展开 E1 其余折叠）：实验 / 目的 / 自变量 / 对比模型 / 指标 / 对应 RQ。 */
 export function ExperimentMatrix({ experiments }: { experiments?: Experiment[] | null }) {
   const exps = asList(experiments);
   if (!exps.length) {
@@ -25,7 +25,7 @@ export function ExperimentMatrix({ experiments }: { experiments?: Experiment[] |
   }
 
   return (
-    <Accordion type="multiple" className="w-full rounded-lg border px-4">
+    <Accordion type="multiple" defaultValue={["exp-0"]} className="w-full rounded-lg border px-4">
       {exps.map((e, i) => (
         <AccordionItem key={i} value={`exp-${i}`}>
           <AccordionTrigger className="text-left">

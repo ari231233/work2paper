@@ -27,49 +27,64 @@ export function KanbanTimeline({ stages }: { stages?: StageExit[] | null }) {
   }
 
   return (
-    <div className="grid auto-cols-[260px] grid-flow-col gap-4 overflow-x-auto pb-2">
-      {list.map((s, si) => {
-        const tasks = asList(s.tasks);
-        const doneCount = tasks.filter((_, ti) => done.has(`${si}-${ti}`)).length;
-        return (
-          <div key={si} className="flex flex-col rounded-lg border bg-card shadow-sm">
-            <div className="flex items-center justify-between border-b px-3 py-2">
-              <span className="text-sm font-semibold">{clean(s.stage)}</span>
-              <Badge variant="secondary">
-                {doneCount}/{tasks.length}
-              </Badge>
-            </div>
-            <ul className="flex-1 space-y-2 p-2">
-              {tasks.map((t, ti) => {
-                const key = `${si}-${ti}`;
-                const checked = done.has(key);
-                return (
-                  <li key={key}>
-                    <button
-                      onClick={() => toggle(key)}
-                      className="flex w-full items-start gap-2 rounded-md bg-muted/50 p-2 text-left text-xs transition-colors hover:bg-muted"
-                    >
-                      <span
-                        className={cn(
-                          "mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded border",
-                          checked ? "border-emerald-500 bg-emerald-500 text-white" : "border-border"
-                        )}
+    <div className="space-y-3">
+      {/* 本地视觉态提示（M25 v3.4）：勾选未持久化，写回项目进度走后续 M24 v2 */}
+      <div className="flex flex-wrap items-center justify-between gap-2 rounded-md bg-muted/50 px-3 py-2 text-xs text-muted-foreground">
+        <span>勾选状态仅保存在当前页面（本地视觉态），未写入项目进度——写回项目进度由后续 M24 v2 支持。</span>
+        {done.size > 0 && (
+          <button
+            onClick={() => setDone(new Set())}
+            className="shrink-0 font-medium text-primary hover:underline"
+          >
+            重置勾选
+          </button>
+        )}
+      </div>
+
+      <div className="grid auto-cols-[260px] grid-flow-col gap-4 overflow-x-auto pb-2">
+        {list.map((s, si) => {
+          const tasks = asList(s.tasks);
+          const doneCount = tasks.filter((_, ti) => done.has(`${si}-${ti}`)).length;
+          return (
+            <div key={si} className="flex flex-col rounded-lg border bg-card shadow-sm">
+              <div className="flex items-center justify-between border-b px-3 py-2">
+                <span className="text-sm font-semibold">{clean(s.stage)}</span>
+                <Badge variant="secondary">
+                  {doneCount}/{tasks.length}
+                </Badge>
+              </div>
+              <ul className="flex-1 space-y-2 p-2">
+                {tasks.map((t, ti) => {
+                  const key = `${si}-${ti}`;
+                  const checked = done.has(key);
+                  return (
+                    <li key={key}>
+                      <button
+                        onClick={() => toggle(key)}
+                        className="flex w-full items-start gap-2 rounded-md bg-muted/50 p-2 text-left text-xs transition-colors hover:bg-muted"
                       >
-                        {checked && <Check className="h-3 w-3" />}
-                      </span>
-                      <span className={cn(checked && "text-muted-foreground line-through")}>{t}</span>
-                    </button>
-                  </li>
-                );
-              })}
-              {!tasks.length && <li className="px-2 text-xs text-muted-foreground">（无任务）</li>}
-            </ul>
-            <div className="border-t px-3 py-2 text-xs text-muted-foreground">
-              出口：{clean(s.exit_criteria) || "—"}
+                        <span
+                          className={cn(
+                            "mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded border",
+                            checked ? "border-emerald-500 bg-emerald-500 text-white" : "border-border"
+                          )}
+                        >
+                          {checked && <Check className="h-3 w-3" />}
+                        </span>
+                        <span className={cn(checked && "text-muted-foreground line-through")}>{t}</span>
+                      </button>
+                    </li>
+                  );
+                })}
+                {!tasks.length && <li className="px-2 text-xs text-muted-foreground">（无任务）</li>}
+              </ul>
+              <div className="border-t px-3 py-2 text-xs text-muted-foreground">
+                出口：{clean(s.exit_criteria) || "—"}
+              </div>
             </div>
-          </div>
-        );
-      })}
+          );
+        })}
+      </div>
     </div>
   );
 }

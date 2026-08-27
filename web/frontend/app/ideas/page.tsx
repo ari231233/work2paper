@@ -11,12 +11,20 @@ import type { IdeaWithEval } from "@/lib/types";
 type SortKey = "thesisFit" | "novelty" | "feasibility" | "evidence" | "workload";
 
 const SORT_OPTIONS: { key: SortKey; label: string }[] = [
-  { key: "thesisFit", label: "Thesis Fit" },
-  { key: "novelty", label: "Novelty" },
-  { key: "feasibility", label: "Feasibility" },
-  { key: "evidence", label: "Evidence" },
-  { key: "workload", label: "Workload" },
+  { key: "thesisFit", label: "论文契合度" },
+  { key: "novelty", label: "创新程度" },
+  { key: "feasibility", label: "可行性" },
+  { key: "evidence", label: "证据强度" },
+  { key: "workload", label: "工作量" },
 ];
+
+const SORT_BASIS: Record<SortKey, string> = {
+  thesisFit: "按论文契合度降序（面向硕士的契合度视角，越高越靠前）",
+  novelty: "按创新程度分数降序（越高越靠前）",
+  feasibility: "按数据可得性排序（高 > 中 > 低）",
+  evidence: "按证据强度排序（强 > 中 > 弱）",
+  workload: "按工作量升序（越小越靠前）",
+};
 
 const FEAS_ORDER: Record<string, number> = { high: 3, medium: 2, low: 1 };
 const EVID_ORDER: Record<string, number> = { strong: 3, medium: 2, weak: 1 };
@@ -54,7 +62,7 @@ export default function IdeasPage() {
     <div className="space-y-5 p-6">
       <div className="flex items-center justify-between gap-3">
         <div>
-          <h2 className="text-lg font-semibold">Ideas（候选创新点池）</h2>
+          <h2 className="text-lg font-semibold">候选创新点（Ideas）</h2>
           <p className="text-sm text-muted-foreground">共 {ranked.length} 个候选，点击进入详情看贡献与风险。</p>
         </div>
         <div className="flex items-center gap-2">
@@ -72,6 +80,8 @@ export default function IdeasPage() {
           </select>
         </div>
       </div>
+
+      <p className="text-xs text-muted-foreground/80">排序依据：{SORT_BASIS[sort]}</p>
 
       {sorted.length ? (
         <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">

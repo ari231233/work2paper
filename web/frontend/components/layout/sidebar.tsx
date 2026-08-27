@@ -8,10 +8,10 @@ import { cn } from "@/lib/utils";
 import { PipelineProgress } from "./pipeline-progress";
 
 const NAV = [
-  { href: "/", label: "Overview", sub: "推荐与结论", icon: LayoutDashboard },
-  { href: "/literature", label: "Literature & Gap", sub: "文献与证据", icon: ScrollText },
-  { href: "/ideas", label: "Ideas", sub: "候选创新点", icon: Lightbulb },
-  { href: "/roadmap", label: "Roadmap", sub: "路线图", icon: Map },
+  { href: "/", label: "总览", sub: "Overview", icon: LayoutDashboard },
+  { href: "/literature", label: "文献与证据", sub: "Literature & Gap", icon: ScrollText },
+  { href: "/ideas", label: "候选创新点", sub: "Ideas", icon: Lightbulb },
+  { href: "/roadmap", label: "路线图", sub: "Roadmap", icon: Map },
 ];
 
 export function Sidebar() {

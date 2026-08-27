@@ -53,7 +53,7 @@ export function IdeaDetailClient() {
       <div className="flex items-center gap-2">
         <Button asChild variant="ghost" size="sm">
           <Link href="/ideas">
-            <ArrowLeft className="h-4 w-4" /> Ideas
+            <ArrowLeft className="h-4 w-4" /> 候选创新点
           </Link>
         </Button>
       </div>
@@ -77,13 +77,16 @@ export function IdeaDetailClient() {
       </Card>
 
       <Tabs value={tab} onValueChange={setTab} className="w-full">
-        <TabsList className="grid w-full grid-cols-5">
-          <TabsTrigger value="overview">Overview</TabsTrigger>
-          <TabsTrigger value="contribution">Contribution</TabsTrigger>
-          <TabsTrigger value="evidence">Evidence</TabsTrigger>
-          <TabsTrigger value="risk">Reviewer Risk</TabsTrigger>
-          <TabsTrigger value="experiments">Experiments</TabsTrigger>
-        </TabsList>
+        {/* Tab 栏滚动吸顶（M25 v3.4）：随内容滚动时固定到顶部 */}
+        <div className="sticky top-0 z-10 -mx-1 bg-background/95 px-1 py-2 backdrop-blur">
+          <TabsList className="grid w-full grid-cols-5">
+            <TabsTrigger value="overview">总览</TabsTrigger>
+            <TabsTrigger value="contribution">贡献</TabsTrigger>
+            <TabsTrigger value="evidence">证据</TabsTrigger>
+            <TabsTrigger value="risk">评审风险</TabsTrigger>
+            <TabsTrigger value="experiments">实验</TabsTrigger>
+          </TabsList>
+        </div>
 
         <TabsContent value="overview">
           <div className="grid gap-4 lg:grid-cols-2">
@@ -218,7 +221,7 @@ export function IdeaDetailClient() {
         <TabsContent value="experiments">
           <div className="space-y-3">
             {isSelected ? (
-              <p className="text-xs text-muted-foreground">实验矩阵来自 Roadmap（针对选中 idea {id}）。</p>
+              <p className="text-xs text-muted-foreground">实验矩阵来自路线图（Roadmap，针对选中 idea {id}）。</p>
             ) : (
               <p className="text-xs text-amber-600">
                 提示：路线图当前针对 {roadmap?.selected_idea ?? "—"}，实验矩阵是其计划，仅供参考。

@@ -171,6 +171,16 @@ export function yearOf(p?: { year?: number } | null): string {
   return y ? String(y) : "";
 }
 
+/** ISO 时间戳 -> 短日期（YYYY-MM-DD），无效则返回空串。 */
+export function shortDate(ts?: string | null): string {
+  if (!ts) return "";
+  const d = new Date(ts);
+  if (Number.isNaN(d.getTime())) return "";
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${d.getFullYear()}-${m}-${day}`;
+}
+
 export function join(v?: string[] | null, sep = "、", limit = 6): string {
   const items = (v ?? []).filter((s) => clean(s));
   const shown = items.slice(0, limit);

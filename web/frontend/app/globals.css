@@ -33,6 +33,18 @@
     --input: 222 24% 84%;
     --ring: 243 75% 52%;
 
+    /* —— 语义色（M25 v3.1 固定色彩规则）——
+       绿=满足/通过 · 蓝紫(--primary/--accent)=中性/选中 · 黄=需补充 · 红=明确阻塞/高风险 · 灰=未知/无证据/不可计算。
+       「弱证据」用黄；仅「证据冲突 / 结论不可用」用红。 */
+    --success: 142 71% 45%;
+    --success-foreground: 0 0% 100%;
+    --warning: 38 92% 50%;
+    --warning-foreground: 24 60% 20%;
+    --danger: 0 72% 51%;
+    --danger-foreground: 0 0% 100%;
+    --neutral: 222 12% 45%;
+    --neutral-foreground: 0 0% 100%;
+
     --radius: 0.6rem;
   }
 
@@ -64,6 +76,15 @@
     --border: 222 30% 18%;
     --input: 222 30% 22%;
     --ring: 243 82% 66%;
+
+    --success: 142 60% 60%;
+    --success-foreground: 142 60% 15%;
+    --warning: 38 92% 60%;
+    --warning-foreground: 38 60% 15%;
+    --danger: 0 63% 45%;
+    --danger-foreground: 0 0% 100%;
+    --neutral: 222 12% 62%;
+    --neutral-foreground: 222 47% 8%;
   }
 }
 
@@ -114,15 +135,15 @@
   outline: 2px solid hsl(var(--primary));
 }
 .react-flow__node-gapNode.strong {
-  border-color: hsl(142 71% 45% / 0.65);
+  border-color: hsl(var(--success) / 0.65);
   background: hsl(142 71% 96%);
   color: hsl(142 71% 25%);
 }
 .react-flow__node-gapNode.weak {
-  border-color: hsl(38 92% 50% / 0.65);
+  border-color: hsl(var(--warning) / 0.65);
 }
 .react-flow__node-gapNode.contradiction {
-  border-color: hsl(var(--destructive) / 0.65);
+  border-color: hsl(var(--danger) / 0.65);
   background: hsl(0 72% 96%);
   color: hsl(0 72% 35%);
 }

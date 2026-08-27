@@ -14,7 +14,7 @@ import { clean, clip } from "@/lib/utils";
 function Chip({ label, value, tone }: { label: string; value: string; tone?: "default" | "warning" }) {
   return (
     <div className="rounded-md bg-muted/60 px-2 py-1 text-center">
-      <div className="text-[10px] uppercase tracking-wide text-muted-foreground">{label}</div>
+      <div className="text-[10px] text-muted-foreground">{label}</div>
       <div className={tone === "warning" ? "text-sm font-semibold text-amber-600" : "text-sm font-semibold"}>
         {value}
       </div>
@@ -22,6 +22,7 @@ function Chip({ label, value, tone }: { label: string; value: string; tone?: "de
   );
 }
 
+/** Ideas 候选卡精简（M25 v3.2）：只保留 3 首要指标，Novelty/Feasibility 移次级弱化行。 */
 export function IdeaCard({ pair, decision }: { pair: IdeaWithEval; decision?: DecisionInfo | null }) {
   const { idea, evaluation } = pair;
   const ev = evaluation;
@@ -43,12 +44,20 @@ export function IdeaCard({ pair, decision }: { pair: IdeaWithEval; decision?: De
             <Badge variant="outline">{typeLabel(ev)}</Badge>
           </div>
 
-          <div className="grid grid-cols-5 gap-1.5">
-            <Chip label="Thesis Fit" value={fit ? String(fit) : "—"} />
-            <Chip label="Novelty" value={num(ev?.novelty_score)} />
-            <Chip label="Evidence" value={evidenceLabel(ev?.evidence_validation?.evidence as never)} tone={ev?.evidence_validation?.evidence === "weak" ? "warning" : undefined} />
-            <Chip label="Feasibility" value={feasibilityLabel(ev?.data_feasibility as never)} />
-            <Chip label="Workload" value={`${num(ev?.workload_hours)}h`} />
+          {/* 3 首要指标：论文契合度 / 证据强度 / 工作量 */}
+          <div className="grid grid-cols-3 gap-1.5">
+            <Chip label="论文契合度" value={fit ? String(fit) : "—"} />
+            <Chip
+              label="证据强度"
+              value={evidenceLabel(ev?.evidence_validation?.evidence as never)}
+              tone={ev?.evidence_validation?.evidence === "weak" ? "warning" : undefined}
+            />
+            <Chip label="工作量" value={`${num(ev?.workload_hours)}h`} />
+          </div>
+
+          {/* 次级指标（弱化）：创新程度 / 可行性 */}
+          <div className="text-[11px] text-muted-foreground/80">
+            创新程度 {num(ev?.novelty_score)} · 可行性 {feasibilityLabel(ev?.data_feasibility as never)}
           </div>
         </CardContent>
       </Card>
