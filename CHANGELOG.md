@@ -16,7 +16,10 @@
 - Web 安装说明改用可直接复制的 GitHub 仓库地址，并补齐项目主页、源码、Issue 与 Changelog 元数据
 - README Web 安装教程重写为 Windows 小白流程，补充环境验证、虚拟环境、API Key、日常启动、更新与故障排查
 - Windows 教程固定使用 `D:\papermine`，并通过 `PAPERMINE_HOME` 将导入与分析数据迁至 `D:\papermine-data`
-- 测试从 364 增至 374 个
+- 测试从 364 增至 376 个
+
+### Fixed
+- `papermine web` 启动前检查 8000/3000 端口占用，并确认新子进程仍存活，避免把残留旧服务误判为启动成功
 
 ## [0.3.0]
 

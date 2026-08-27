@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import socket
 import subprocess
 import sys
 import time
@@ -48,6 +49,22 @@ def _ensure_frontend(npm: str, env: Dict[str, str], dev: bool) -> None:
             raise RuntimeError("Web 前端构建失败，请查看上方输出")
 
 
+def _ensure_port_available(host: str, port: int, service: str) -> None:
+    """启动前独占探测端口，避免把残留旧服务误判为新进程已就绪。"""
+    family = socket.AF_INET6 if ":" in host else socket.AF_INET
+    address = (host, port, 0, 0) if family == socket.AF_INET6 else (host, port)
+    probe = socket.socket(family, socket.SOCK_STREAM)
+    try:
+        probe.bind(address)
+    except OSError as exc:
+        raise RuntimeError(
+            "{}端口 {} 已被占用；请关闭旧的 papermine 服务，"
+            "或指定其他端口".format(service, port)
+        ) from exc
+    finally:
+        probe.close()
+
+
 def _wait_ready(url: str, process: subprocess.Popen, timeout: float = 30.0) -> None:
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -55,6 +72,11 @@ def _wait_ready(url: str, process: subprocess.Popen, timeout: float = 30.0) -> N
             raise RuntimeError("服务启动失败（退出码 {}）".format(process.returncode))
         try:
             if httpx.get(url, timeout=0.8).status_code < 500:
+                # 端口可能由旧服务响应，而刚启动的子进程正在因 bind 失败退出。
+                # 给子进程一个短暂确认窗口，必须仍存活才算本次启动成功。
+                time.sleep(0.15)
+                if process.poll() is not None:
+                    raise RuntimeError("服务启动失败（退出码 {}）".format(process.returncode))
                 return
         except httpx.HTTPError:
             pass
@@ -89,6 +111,8 @@ def run_web(
     web_url = "http://{}:{}".format(browser_host, web_port)
     env = dict(os.environ)
     env["PAPERMINE_API_ORIGIN"] = api_origin
+    _ensure_port_available(host, api_port, "后端")
+    _ensure_port_available(host, web_port, "网页")
     _ensure_frontend(npm, env, dev)
 
     backend: Optional[subprocess.Popen] = None
