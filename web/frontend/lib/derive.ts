@@ -447,6 +447,8 @@ export function buildFocus(dossier?: Dossier | null): Focus {
  * - peripheral：其余（与当前推荐主线关系较远）。
  */
 export function relevanceOf(fp: FlatPaper, focus: Focus): Relevance {
+  if (fp.paper.relevance_level === "high") return "relevant";
+  if (fp.paper.relevance_level === "partial") return "partial";
   const title = clean(fp.paper.title);
   if (focus.titles.has(title)) return "relevant";
   const entryGapIds = asList(fp.entry?.contradiction_graph?.gaps).map((g) => clean(g.gap_id));
@@ -455,9 +457,9 @@ export function relevanceOf(fp: FlatPaper, focus: Focus): Relevance {
 }
 
 export const RELEVANCE_LABELS: Record<Relevance, string> = {
-  relevant: "Relevant",
-  partial: "Partial",
-  peripheral: "Peripheral",
+  relevant: "高度相关",
+  partial: "部分相关",
+  peripheral: "背景参考",
 };
 
 export const RELEVANCE_TONES: Record<Relevance, "good" | "warn" | "neutral"> = {

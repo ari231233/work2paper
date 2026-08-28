@@ -3,7 +3,7 @@
 import type { Paper } from "@/lib/types";
 import { RELEVANCE_LABELS, type Relevance } from "@/lib/derive";
 import { Badge } from "@/components/ui/badge";
-import { clip, clean } from "@/lib/utils";
+import { asList, clip, clean } from "@/lib/utils";
 import { yearOf } from "@/lib/format";
 
 const RELEVANCE_BADGE: Record<Relevance, "success" | "warning" | "outline"> = {
@@ -24,19 +24,30 @@ function Field({ label, value }: { label: string; value?: string | null }) {
 }
 
 export function PaperCard({ paper, relevance }: { paper: Paper; relevance: Relevance }) {
-  const meta = [clean(paper.venue), yearOf(paper), clean(paper.source)].filter(Boolean).join(" · ");
+  const sources = asList(paper.source_records).map(clean).filter(Boolean);
+  if (!sources.length && clean(paper.source)) sources.push(clean(paper.source));
+  const meta = [clean(paper.venue), yearOf(paper), sources.join(" / ")].filter(Boolean).join(" · ");
   const card = paper.evidence_card;
   const u = paper.understanding;
 
   return (
     <div className="rounded-lg border bg-card p-3 shadow-sm">
       <div className="mb-1.5 flex items-start justify-between gap-2">
-        <h4 className="text-sm font-medium leading-snug">{clean(paper.title) || "（无标题）"}</h4>
+        <h4 className="text-sm font-medium leading-snug">
+          {paper.url ? (
+            <a href={paper.url} target="_blank" rel="noreferrer" className="hover:text-primary hover:underline">
+              {clean(paper.title) || "（无标题）"}
+            </a>
+          ) : (clean(paper.title) || "（无标题）")}
+        </h4>
         <Badge variant={RELEVANCE_BADGE[relevance]} className="shrink-0">
           {RELEVANCE_LABELS[relevance]}
         </Badge>
       </div>
       {meta && <div className="mb-1.5 text-xs text-muted-foreground">{meta}</div>}
+      {paper.match_reason ? (
+        <div className="mb-1.5 text-xs text-muted-foreground">匹配依据：{clean(paper.match_reason)}</div>
+      ) : null}
 
       <div className="space-y-1 border-t pt-2">
         <Field label="核心主张" value={u?.claim} />

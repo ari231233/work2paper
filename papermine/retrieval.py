@@ -1,4 +1,4 @@
-"""③ 领域知识检索：arXiv + Semantic Scholar（httpx）+ 查询改写循环 + 本地缓存 + 优雅降级。
+"""③ 领域知识检索：五个公开来源 + 分层召回 + 查询改写 + 缓存 + 优雅降级。
 
 对应 docs/build-plan.md §4 M5 与 docs/architecture.md §5 ③：
 
@@ -25,6 +25,7 @@ import json
 import os
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from xml.etree import ElementTree
@@ -38,6 +39,9 @@ __all__ = [
     "search_literature",
     "ARXIV_API",
     "S2_API",
+    "OPENALEX_API",
+    "CROSSREF_API",
+    "DBLP_API",
     "MAX_ROUNDS",
     "DEFAULT_TTL_SECONDS",
     "QUERY_REWRITE_SCHEMA",
@@ -48,6 +52,9 @@ __all__ = [
     "_arxiv_fetch",
     "_arxiv_field_query",
     "_s2_search",
+    "_openalex_search",
+    "_crossref_search",
+    "_dblp_search",
     "_search_once",
     "_llm_rewrite",
     "_translate_query",
@@ -65,11 +72,16 @@ __all__ = [
 # ---- 常量 ----
 ARXIV_API = "https://export.arxiv.org/api/query"
 S2_API = "https://api.semanticscholar.org/graph/v1/paper/search"
+OPENALEX_API = "https://api.openalex.org/works"
+CROSSREF_API = "https://api.crossref.org/works"
+DBLP_API = "https://dblp.org/search/publ/api"
 S2_FIELDS = "title,authors,abstract,year,externalIds,url,venue"
 
-MAX_RESULTS = 5          # 每个源每轮最多取回论文数
+MAX_RESULTS = 8          # 每个源每轮最多取回论文数
 TIMEOUT = 20.0           # 单次 HTTP 超时（秒）
 MAX_ROUNDS = 3           # 查询改写循环最大轮数（含首轮原始查询）
+TARGET_PAPERS = 8        # 每个研究方向目标数量
+MAX_PAPERS = 12          # 每个研究方向展示上限
 DEFAULT_TTL_SECONDS = 7 * 24 * 3600   # 文献缓存 TTL：7 天
 
 # Semantic Scholar 429 限流重试（公开 API 无 key 时易触发）
@@ -98,12 +110,16 @@ def _http() -> httpx.Client:
     """返回进程内复用的 httpx.Client；首次调用时创建（trust_env 读代理）。"""
     global _http_client
     if _http_client is None or _http_client.is_closed:
-        _http_client = httpx.Client(timeout=TIMEOUT, follow_redirects=True)
+        _http_client = httpx.Client(
+            timeout=TIMEOUT,
+            follow_redirects=True,
+            headers={"User-Agent": "papermine/0.3 (+https://github.com/ari231233/work2paper)"},
+        )
     return _http_client
 
 # 缓存文件内嵌 schema 名 / 版本（区别于 dossier）
 CACHE_SCHEMA = "literature_cache"
-CACHE_SCHEMA_VERSION = 1
+CACHE_SCHEMA_VERSION = 2
 
 _ATOM = "{http://www.w3.org/2005/Atom}"
 
@@ -171,22 +187,49 @@ def _dedup_strings(items: Any) -> List[str]:
 
 
 def _paper_key(paper: Dict[str, Any]) -> str:
-    """论文去重键：归一化标题（小写）。"""
-    return _clean_ws(paper.get("title")).lower()
+    """论文去重键：DOI > arXiv ID > 去标点标题。"""
+    doi = _clean_ws(paper.get("doi")).lower()
+    if not doi:
+        external = _clean_ws(paper.get("external_id")).lower()
+        if external.startswith("10."):
+            doi = external
+    if doi:
+        return "doi:" + re.sub(r"^https?://(?:dx\.)?doi\.org/", "", doi)
+    external = _clean_ws(paper.get("external_id")).lower()
+    if external and not external.startswith("10."):
+        return "external:" + re.sub(r"v\d+$", "", external)
+    title = _clean_ws(paper.get("title")).lower()
+    return "title:" + re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "", title)
 
 
 def _dedup_papers(papers: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """按标题去重（无标题的论文无法被引用，丢弃）。"""
+    """跨源去重并合并来源；无标题论文无法被引用，丢弃。"""
     out: List[Dict[str, Any]] = []
-    seen: set = set()
+    seen: Dict[str, Dict[str, Any]] = {}
     for p in papers or []:
         if not isinstance(p, dict):
             continue
+        title = _clean_ws(p.get("title"))
         key = _paper_key(p)
-        if not key or key in seen:
+        if not title or key in {"title:", "external:"}:
             continue
-        seen.add(key)
-        out.append(p)
+        source = _clean_ws(p.get("source"))
+        if key in seen:
+            current = seen[key]
+            records = current.setdefault("source_records", [])
+            for item in list(p.get("source_records") or []) + ([source] if source else []):
+                if item and item not in records:
+                    records.append(item)
+            for field in ("abstract", "venue", "url", "doi", "external_id", "year", "authors"):
+                if not current.get(field) and p.get(field):
+                    current[field] = p[field]
+            continue
+        copy = dict(p)
+        copy["source_records"] = _dedup_strings(
+            list(copy.get("source_records") or []) + ([source] if source else [])
+        )
+        seen[key] = copy
+        out.append(copy)
     return out
 
 
@@ -283,6 +326,7 @@ def _arxiv_fetch(search_query: str, max_results: int = MAX_RESULTS,
             "venue": "arXiv",
             "source": "arxiv",
             "external_id": _arxiv_id(url),
+            "doi": "",
         })
     return papers
 
@@ -336,6 +380,7 @@ def _s2_search(query: str, max_results: int = MAX_RESULTS,
             if isinstance(a, dict) and a.get("name")
         ]
         ext = item.get("externalIds") or {}
+        doi = _clean_ws(ext.get("DOI"))
         papers.append({
             "title": title,
             "authors": authors,
@@ -345,6 +390,158 @@ def _s2_search(query: str, max_results: int = MAX_RESULTS,
             "venue": _clean_ws(item.get("venue")),
             "source": "semantic_scholar",
             "external_id": ext.get("ArXiv") or ext.get("DOI") or "",
+            "doi": doi,
+        })
+    return papers
+
+
+# ---- OpenAlex / Crossref / DBLP 检索（JSON）----
+
+def _openalex_abstract(inverted: Any) -> str:
+    """把 OpenAlex abstract_inverted_index 还原为普通摘要。"""
+    if not isinstance(inverted, dict):
+        return ""
+    positioned: List[tuple] = []
+    for word, positions in inverted.items():
+        for position in positions or []:
+            if isinstance(position, int):
+                positioned.append((position, str(word)))
+    return _clean_ws(" ".join(word for _, word in sorted(positioned)))
+
+
+def _openalex_search(query: str, max_results: int = MAX_RESULTS,
+                     timeout: float = TIMEOUT) -> List[Dict[str, Any]]:
+    """OpenAlex Works API 检索并标准化。"""
+    params = {
+        "search": query,
+        "per-page": max_results,
+        "select": (
+            "id,doi,title,display_name,publication_year,authorships,"
+            "primary_location,abstract_inverted_index"
+        ),
+    }
+    resp = _http().get(OPENALEX_API, params=params, timeout=timeout)
+    resp.raise_for_status()
+    data = resp.json()
+    papers: List[Dict[str, Any]] = []
+    for item in (data.get("results") or []) if isinstance(data, dict) else []:
+        if not isinstance(item, dict):
+            continue
+        title = _clean_ws(item.get("display_name") or item.get("title"))
+        if not title:
+            continue
+        authors = [
+            _clean_ws((authorship.get("author") or {}).get("display_name"))
+            for authorship in (item.get("authorships") or [])
+            if isinstance(authorship, dict)
+        ]
+        location = item.get("primary_location") or {}
+        source = (location.get("source") or {}) if isinstance(location, dict) else {}
+        doi = _clean_ws(item.get("doi"))
+        doi = re.sub(r"^https?://(?:dx\.)?doi\.org/", "", doi, flags=re.IGNORECASE)
+        papers.append({
+            "title": title,
+            "authors": [a for a in authors if a],
+            "year": item.get("publication_year"),
+            "abstract": _openalex_abstract(item.get("abstract_inverted_index")),
+            "url": _clean_ws(item.get("doi") or item.get("id")),
+            "venue": _clean_ws(source.get("display_name") if isinstance(source, dict) else ""),
+            "source": "openalex",
+            "external_id": _clean_ws(item.get("id")),
+            "doi": doi,
+        })
+    return papers
+
+
+def _crossref_year(item: Dict[str, Any]) -> Optional[int]:
+    for key in ("published-print", "published-online", "published", "issued"):
+        value = item.get(key) or {}
+        parts = value.get("date-parts") if isinstance(value, dict) else None
+        if parts and parts[0] and isinstance(parts[0][0], int):
+            return parts[0][0]
+    return None
+
+
+def _crossref_search(query: str, max_results: int = MAX_RESULTS,
+                     timeout: float = TIMEOUT) -> List[Dict[str, Any]]:
+    """Crossref Works API 检索并标准化。"""
+    params = {"query.bibliographic": query, "rows": max_results}
+    resp = _http().get(CROSSREF_API, params=params, timeout=timeout)
+    resp.raise_for_status()
+    data = resp.json()
+    message = data.get("message") if isinstance(data, dict) else {}
+    papers: List[Dict[str, Any]] = []
+    for item in (message.get("items") or []) if isinstance(message, dict) else []:
+        if not isinstance(item, dict):
+            continue
+        titles = item.get("title") or []
+        title = _clean_ws(titles[0] if titles else "")
+        if not title:
+            continue
+        authors = []
+        for author in item.get("author") or []:
+            if isinstance(author, dict):
+                name = _clean_ws("{} {}".format(author.get("given", ""), author.get("family", "")))
+                if name:
+                    authors.append(name)
+        containers = item.get("container-title") or []
+        doi = _clean_ws(item.get("DOI")).lower()
+        papers.append({
+            "title": title,
+            "authors": authors,
+            "year": _crossref_year(item),
+            "abstract": _clean_ws(re.sub(r"<[^>]+>", " ", str(item.get("abstract") or ""))),
+            "url": _clean_ws(item.get("URL")),
+            "venue": _clean_ws(containers[0] if containers else ""),
+            "source": "crossref",
+            "external_id": doi,
+            "doi": doi,
+        })
+    return papers
+
+
+def _dblp_authors(value: Any) -> List[str]:
+    if isinstance(value, dict):
+        value = value.get("author")
+    if isinstance(value, str):
+        return [_clean_ws(value)] if _clean_ws(value) else []
+    if isinstance(value, dict):
+        value = [value]
+    return [
+        _clean_ws(item.get("text") if isinstance(item, dict) else item)
+        for item in (value or [])
+        if _clean_ws(item.get("text") if isinstance(item, dict) else item)
+    ]
+
+
+def _dblp_search(query: str, max_results: int = MAX_RESULTS,
+                 timeout: float = TIMEOUT) -> List[Dict[str, Any]]:
+    """DBLP publication search API 检索并标准化。"""
+    params = {"q": query, "h": max_results, "format": "json"}
+    resp = _http().get(DBLP_API, params=params, timeout=timeout)
+    resp.raise_for_status()
+    data = resp.json()
+    hits = (((data.get("result") or {}).get("hits") or {}).get("hit") or []) \
+        if isinstance(data, dict) else []
+    papers: List[Dict[str, Any]] = []
+    for hit in hits:
+        info = hit.get("info") if isinstance(hit, dict) else None
+        if not isinstance(info, dict):
+            continue
+        title = _clean_ws(re.sub(r"<[^>]+>", " ", str(info.get("title") or "")))
+        if not title:
+            continue
+        doi = _clean_ws(info.get("doi")).lower()
+        papers.append({
+            "title": title,
+            "authors": _dblp_authors(info.get("authors")),
+            "year": _year_from(info.get("year")),
+            "abstract": "",
+            "url": _clean_ws(info.get("ee") or info.get("url")),
+            "venue": _clean_ws(info.get("venue")),
+            "source": "dblp",
+            "external_id": doi or _clean_ws(info.get("key")),
+            "doi": doi,
         })
     return papers
 
@@ -352,7 +549,8 @@ def _s2_search(query: str, max_results: int = MAX_RESULTS,
 # ---- 本地缓存（literature_cache/）----
 
 def _cache_key(query: str) -> str:
-    return hashlib.sha1(_clean_ws(query).lower().encode("utf-8")).hexdigest()
+    material = "v{}:{}".format(CACHE_SCHEMA_VERSION, _clean_ws(query).lower())
+    return hashlib.sha1(material.encode("utf-8")).hexdigest()
 
 
 def _cache_path(cache_dir: Any, query: str) -> Path:
@@ -370,6 +568,8 @@ def _cache_read(query: str, cache_dir: Any,
     except (OSError, json.JSONDecodeError):
         return None
     if not isinstance(data, dict):
+        return None
+    if data.get("_schema") != CACHE_SCHEMA or data.get("_schema_version") != CACHE_SCHEMA_VERSION:
         return None
     if time.time() - float(data.get("fetched_at", 0)) > ttl:
         return None
@@ -400,7 +600,7 @@ def _cache_write(query: str, cache_dir: Any,
         pass
 
 
-# ---- 单轮检索（缓存优先，双源 best-effort）----
+# ---- 单轮检索（缓存优先，五源 best-effort）----
 
 def _search_once(query: str, cache_dir: Any,
                  ttl: int = DEFAULT_TTL_SECONDS) -> tuple:
@@ -415,15 +615,24 @@ def _search_once(query: str, cache_dir: Any,
 
     papers: List[Dict[str, Any]] = []
     sources: List[str] = []
-    for name, fn in (("arxiv", _arxiv_search), ("semantic_scholar", _s2_search)):
-        try:
-            batch = fn(query)
-        except Exception:
-            # 网络 / 限流 / 解析失败：该源降级跳过，不崩整个检索
-            continue
-        if isinstance(batch, list):
-            papers.extend(batch)
-            sources.append(name)
+    searchers = (
+        ("arxiv", _arxiv_search),
+        ("semantic_scholar", _s2_search),
+        ("openalex", _openalex_search),
+        ("crossref", _crossref_search),
+        ("dblp", _dblp_search),
+    )
+    with ThreadPoolExecutor(max_workers=len(searchers)) as pool:
+        futures = [(name, pool.submit(fn, query)) for name, fn in searchers]
+        for name, future in futures:
+            try:
+                batch = future.result()
+            except Exception:
+                # 网络 / 限流 / 解析失败：该源降级跳过，不崩整个检索
+                continue
+            if isinstance(batch, list) and batch:
+                papers.extend(batch)
+                sources.append(name)
 
     papers = _dedup_papers(papers)
     if sources:
@@ -612,7 +821,104 @@ def _filter_relevant(llm: Optional[LLMProvider], query: str, keywords: Any,
     if relevant is None:
         return papers
     keep = {_clean_ws(t).lower() for t in relevant if _clean_ws(t)}
-    return [p for p in papers if _paper_key(p) in keep]
+    return [p for p in papers if _clean_ws(p.get("title")).lower() in keep]
+
+
+# ---- M29 分层召回：高度相关优先，不足时补部分相关 ----
+
+_QUERY_EXPANSIONS = {
+    "remaining useful life": "prognostics health management condition monitoring",
+    "obstacle avoidance": "collision avoidance path planning motion planning",
+    "collision avoidance": "conflict detection resolution path planning",
+    "prescribed performance": "nonlinear robust tracking control",
+    "trajectory tracking": "path following guidance control",
+    "anomaly detection": "fault detection condition monitoring",
+    "time series": "temporal data sequence modeling",
+    "evtol": "urban air mobility aircraft control",
+}
+
+
+def _normalized_terms(query: str, keywords: Any) -> List[str]:
+    terms = [_clean_ws(item).lower() for item in (keywords or []) if _clean_ws(item)]
+    return terms or _extract_keywords(query)
+
+
+def _paper_term_hits(paper: Dict[str, Any], terms: List[str]) -> List[str]:
+    text = " ".join([
+        _clean_ws(paper.get("title")),
+        _clean_ws(paper.get("abstract")),
+    ]).lower()
+    hits: List[str] = []
+    for term in terms:
+        if " " in term or "-" in term:
+            matched = term in text
+        else:
+            matched = re.search(r"\b" + re.escape(term), text) is not None
+        if matched:
+            hits.append(term)
+    return hits
+
+
+def _select_tiered_papers(query: str, keywords: Any,
+                          papers: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """按术语覆盖把候选分成 high/partial，并返回最多 12 篇。"""
+    terms = _normalized_terms(query, keywords)
+    high: List[Dict[str, Any]] = []
+    partial: List[Dict[str, Any]] = []
+    for paper in _dedup_papers(papers):
+        hits = _paper_term_hits(paper, terms)
+        if not terms:
+            level = "partial"
+        elif len(terms) == 1:
+            level = "high" if hits else ""
+        else:
+            level = "high" if len(hits) >= 2 else ("partial" if hits else "")
+        if not level:
+            continue
+        item = dict(paper)
+        item["relevance_level"] = level
+        if hits:
+            item["match_reason"] = "命中核心术语：{}".format("、".join(hits[:4]))
+        else:
+            item["match_reason"] = "扩展检索获得，需结合摘要人工核验"
+        (high if level == "high" else partial).append(item)
+    return (high + partial)[:MAX_PAPERS]
+
+
+def _expansion_queries(query: str, keywords: Any) -> List[str]:
+    """确定性生成由窄到宽的扩展查询，不增加 LLM 调用。"""
+    terms = _normalized_terms(query, keywords)
+    candidates: List[str] = []
+    words = _extract_keywords(query)
+    if len(words) >= 4:
+        candidates.append(" ".join(words[:4]))
+    if len(words) >= 3:
+        candidates.append(" ".join(words[:3]))
+    lowered = _clean_ws(query).lower()
+    for phrase, expansion in _QUERY_EXPANSIONS.items():
+        if phrase in lowered or phrase in terms:
+            candidates.append(expansion)
+    if terms:
+        candidates.append(" ".join(terms[:2]))
+    original = lowered
+    return [item for item in _dedup_strings(candidates) if item.lower() != original][:3]
+
+
+def _retrieve_tiered(query: str, keywords: Any, cache_dir: Any,
+                     llm: Optional[LLMProvider]) -> tuple:
+    """先跑原始/改写检索，不足目标时用确定性宽化查询补召回。"""
+    papers, sources = _retrieve_with_rewrite(query, cache_dir, llm)
+    selected = _select_tiered_papers(query, keywords, papers)
+    for expanded in _expansion_queries(query, keywords):
+        if len(selected) >= TARGET_PAPERS:
+            break
+        batch, batch_sources = _search_once(expanded, cache_dir)
+        papers = _dedup_papers(papers + batch)
+        for source in batch_sources:
+            if source not in sources:
+                sources.append(source)
+        selected = _select_tiered_papers(query, keywords, papers)
+    return selected, sources
 
 
 # ---- gap_note ----
@@ -674,13 +980,18 @@ def search_literature(queries, cache_dir, llm) -> List[dict]:
     entries: List[dict] = []
     for query in _dedup_strings(queries):
         en_query, keywords = _translate_query(llm, query)
-        papers, sources = _retrieve_with_rewrite(en_query, cache_dir, llm)
-        papers = _filter_relevant(llm, en_query, keywords, papers)
+        papers, sources = _retrieve_tiered(en_query, keywords, cache_dir, llm)
         gap_note = _llm_gap_note(llm, en_query, papers) or _default_gap_note(papers, sources)
+        high_count = len([p for p in papers if p.get("relevance_level") == "high"])
+        partial_count = len(papers) - high_count
         entries.append({
             "query": query,
             "papers": papers,
             "gap_note": gap_note,
             "sources": sorted(set(sources)),
+            "target_count": TARGET_PAPERS,
+            "high_count": high_count,
+            "partial_count": partial_count,
+            "coverage_status": "sufficient" if len(papers) >= 7 else "insufficient",
         })
     return entries

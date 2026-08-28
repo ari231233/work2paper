@@ -5,6 +5,8 @@
 ## [Unreleased]
 
 ### Added
+- M29 多源分层文献检索：新增 OpenAlex、Crossref、DBLP，与 arXiv、Semantic Scholar 共同召回；每个研究方向目标 8 篇、最多 12 篇
+- M29 相关性分层：高度相关优先，不足时通过确定性宽化查询补充部分相关论文，并在 Web 显示匹配依据与覆盖状态
 - M28 主流科研文档解析：支持 PDF 文本层、扫描型 PDF 中英文 OCR、DOCX 正文/表格/页眉页脚、PPTX 正文/表格/演讲者备注，以及两类 Office 文档的内嵌图片 OCR
 - M28 文档正文证据：优先向项目理解 Agent 提供主稿标题/摘要短摘录，并对重复文档和 archive/tmp 历史副本降权
 - M26 Web 本地分发：新增 `papermine web`，统一启动/关闭 FastAPI 与 Next.js，支持自定义端口、开发模式和自动打开浏览器
@@ -14,6 +16,8 @@
 - M27 导入进度反馈：文件夹/ZIP 显示真实上传百分比，分析阶段显示 Q 版科研助手动画与当前耗时
 
 ### Changed
+- 文献缓存升级到 v2；多来源论文按 DOI、arXiv ID、规范化标题去重并合并来源记录
+- 五个公开检索源并行请求，单源失败不阻塞其他来源，扩展检索不增加 LLM 改写轮数
 - 新增 `documents` 可选依赖；`web` 安装现在一并包含本地文档解析与 OCR 运行组件，不要求额外安装 OCR 程序
 - 英文关键词改用词元边界匹配，避免 `text` 命中 `context`、`fault` 命中 `default`；补充航空航天、避障、轨迹跟踪与飞行控制领域信号
 - 项目理解 prompt 升级到 v2，正文直接证据优先于孤立关键词计数，发送给 LLM 的证据数量设有上限
@@ -22,7 +26,7 @@
 - Web 安装说明改用可直接复制的 GitHub 仓库地址，并补齐项目主页、源码、Issue 与 Changelog 元数据
 - README Web 安装教程重写为 Windows 小白流程，补充环境验证、虚拟环境、API Key、日常启动、更新与故障排查
 - Windows 教程固定使用 `D:\papermine`，并通过 `PAPERMINE_HOME` 将导入与分析数据迁至 `D:\papermine-data`
-- 测试从 364 增至 388 个
+- 测试从 364 增至 396 个
 
 ### Fixed
 - `papermine web` 启动前检查 8000/3000 端口占用，并确认新子进程仍存活，避免把残留旧服务误判为启动成功

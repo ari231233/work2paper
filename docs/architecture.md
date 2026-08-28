@@ -224,7 +224,7 @@ Dossier 是**单项目唯一事实源**，所有 Agent 只通过它读写。每�
 
 ### ③ 领域知识检索 Agent
 - **职责**：候选问题/创新点 → 文献图谱 + gap 笔记。
-- **工具**：arXiv API、Semantic Scholar、DBLP、（可选）知网。**优先级：arXiv / Semantic Scholar 优先，知网后置。**
+- **工具**：arXiv、Semantic Scholar、OpenAlex、Crossref、DBLP 等公开 API；多源去重并按高度相关/部分相关分层。知网后置。
 - **agentic**：查询改写循环（初始 query → 判断相关性 → 改写 → 再检索，最多 N 轮）。
 
 ### ④ 创新点生成 Agent
@@ -281,7 +281,7 @@ UNDERSTAND ──☑1──> ABSTRACT ──☑2──> RETRIEVE <==> GENERATE
 | LLM 抽象 | 自研 `LLMProvider` 接口 | 已定（可插拔） |
 | 结构化输出 | function-calling / JSON mode + Schema 校验 | 已定 |
 | 编排 | 自研轻量状态机 | 已定 |
-| 检索 | arXiv / Semantic Scholar 优先，知网后置 | ✅ 已定 |
+| 检索 | arXiv / Semantic Scholar / OpenAlex / Crossref / DBLP 多源召回，知网后置 | ✅ 已定 |
 | 存储 | 本地 JSON（Dossier + 经验库） | 已定 |
 | 检查点 | **暂停等确认** | ✅ 已定 |
 | 依赖策略 | 仅新增 HTTP + 可选 pydantic | 已定 |
@@ -370,7 +370,7 @@ class LLMProvider(Protocol):
 ## 14. 已定决策
 
 1. ✅ LLM 后端：**DeepSeek**（OpenAI 兼容）。
-2. ✅ 检索源优先级：**arXiv / Semantic Scholar 优先，知网后置**。
+2. ✅ 检索源：**arXiv / Semantic Scholar / OpenAlex / Crossref / DBLP 多源召回与去重，知网后置**。
 3. ✅ 人类检查点：**暂停等确认**。
 4. ✅ 自进化：Evolution Layer（§3）已纳入架构；MVP 用"经验库 + 检索注入"，不做权重微调。
 

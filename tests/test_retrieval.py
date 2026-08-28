@@ -24,6 +24,9 @@ from papermine.retrieval import (
     _extract_keywords,
     _filter_relevant,
     _keyword_relevance,
+    _openalex_search,
+    _crossref_search,
+    _dblp_search,
     _s2_search,
     _translate_query,
     search_literature,
@@ -144,13 +147,66 @@ class ParsingTest(unittest.TestCase):
             with self.assertRaises(httpx.HTTPError):
                 _arxiv_search("x")
 
+    def test_openalex_search_parses_json(self):
+        data = {"results": [{
+            "id": "https://openalex.org/W1",
+            "doi": "https://doi.org/10.1/shared",
+            "display_name": "Robust Flight Control",
+            "publication_year": 2024,
+            "authorships": [{"author": {"display_name": "Alice"}}],
+            "primary_location": {"source": {"display_name": "Control Journal"}},
+            "abstract_inverted_index": {"flight": [0], "control": [1]},
+        }]}
+        with mock.patch.object(retrieval, "_http") as m_http:
+            m_http.return_value.get.return_value = _FakeResp(json_data=data)
+            paper = _openalex_search("flight control")[0]
+        self.assertEqual(paper["title"], "Robust Flight Control")
+        self.assertEqual(paper["abstract"], "flight control")
+        self.assertEqual(paper["doi"], "10.1/shared")
+        self.assertEqual(paper["source"], "openalex")
+
+    def test_crossref_search_parses_json(self):
+        data = {"message": {"items": [{
+            "title": ["Trajectory Tracking"], "DOI": "10.2/x",
+            "author": [{"given": "Bo", "family": "Li"}],
+            "published": {"date-parts": [[2023, 1, 1]]},
+            "container-title": ["IEEE Access"], "URL": "https://doi.org/10.2/x",
+        }]}}
+        with mock.patch.object(retrieval, "_http") as m_http:
+            m_http.return_value.get.return_value = _FakeResp(json_data=data)
+            paper = _crossref_search("trajectory tracking")[0]
+        self.assertEqual(paper["authors"], ["Bo Li"])
+        self.assertEqual(paper["year"], 2023)
+        self.assertEqual(paper["source"], "crossref")
+
+    def test_dblp_search_parses_json(self):
+        data = {"result": {"hits": {"hit": [{"info": {
+            "title": "Motion Planning", "authors": {"author": [{"text": "C. Wu"}]},
+            "year": "2022", "venue": "ICRA", "key": "conf/icra/x",
+        }}]}}}
+        with mock.patch.object(retrieval, "_http") as m_http:
+            m_http.return_value.get.return_value = _FakeResp(json_data=data)
+            paper = _dblp_search("motion planning")[0]
+        self.assertEqual(paper["authors"], ["C. Wu"])
+        self.assertEqual(paper["venue"], "ICRA")
+        self.assertEqual(paper["source"], "dblp")
+
 
 class SearchLiteratureTest(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.cache_dir = Path(self._tmp.name)
+        self._extra_source_patches = [
+            mock.patch.object(retrieval, "_openalex_search", return_value=[]),
+            mock.patch.object(retrieval, "_crossref_search", return_value=[]),
+            mock.patch.object(retrieval, "_dblp_search", return_value=[]),
+        ]
+        for patcher in self._extra_source_patches:
+            patcher.start()
 
     def tearDown(self):
+        for patcher in self._extra_source_patches:
+            patcher.stop()
         self._tmp.cleanup()
 
     def test_returns_entry_per_query(self):
@@ -327,11 +383,84 @@ class RelevanceFilterTest(unittest.TestCase):
                          ["improve", "rul", "prediction"])
 
 
+class TieredRetrievalTest(unittest.TestCase):
+    def test_high_first_then_partial_fills_target(self):
+        papers = []
+        for index in range(5):
+            paper = _paper("Obstacle Avoidance Flight Control {}".format(index))
+            paper["abstract"] = "obstacle avoidance for aircraft flight control"
+            papers.append(paper)
+        for index in range(5):
+            paper = _paper("Aircraft Guidance {}".format(index), "openalex")
+            paper["abstract"] = "flight guidance for aircraft"
+            papers.append(paper)
+        selected = retrieval._select_tiered_papers(
+            "obstacle avoidance flight control", [], papers
+        )
+        self.assertGreaterEqual(len(selected), 8)
+        self.assertEqual([p["relevance_level"] for p in selected[:5]], ["high"] * 5)
+        self.assertTrue(all(p.get("match_reason") for p in selected))
+
+    def test_expansion_runs_only_until_target(self):
+        initial = []
+        for index in range(3):
+            paper = _paper("Trajectory Tracking Control {}".format(index))
+            paper["abstract"] = "trajectory tracking control"
+            initial.append(paper)
+        extra = []
+        for index in range(8):
+            paper = _paper("Path Following Guidance {}".format(index), "dblp")
+            paper["abstract"] = "trajectory guidance and path following"
+            extra.append(paper)
+        with mock.patch.object(retrieval, "_retrieve_with_rewrite", return_value=(initial, ["arxiv"])), \
+             mock.patch.object(retrieval, "_search_once", return_value=(extra, ["dblp"])) as search:
+            papers, sources = retrieval._retrieve_tiered(
+                "trajectory tracking control aircraft", [], Path("cache"), NullProvider()
+            )
+        self.assertGreaterEqual(len(papers), 8)
+        self.assertLessEqual(len(papers), retrieval.MAX_PAPERS)
+        self.assertIn("dblp", sources)
+        self.assertEqual(search.call_count, 1)
+
+    def test_still_insufficient_is_reported_without_duplicates(self):
+        only = _paper("Rare Topic Study")
+        only["abstract"] = "rare topic"
+        with mock.patch.object(retrieval, "_retrieve_with_rewrite", return_value=([only], ["arxiv"])), \
+             mock.patch.object(retrieval, "_search_once", return_value=([only], ["arxiv"])):
+            papers, _ = retrieval._retrieve_tiered(
+                "rare topic research", [], Path("cache"), NullProvider()
+            )
+        self.assertEqual(len(papers), 1)
+
+    def test_one_source_failure_keeps_other_sources(self):
+        hit = _paper("Anomaly Detection", "openalex")
+        with mock.patch.object(retrieval, "_arxiv_search", side_effect=RuntimeError("down")), \
+             mock.patch.object(retrieval, "_s2_search", return_value=[]), \
+             mock.patch.object(retrieval, "_openalex_search", return_value=[hit]), \
+             mock.patch.object(retrieval, "_crossref_search", return_value=[]), \
+             mock.patch.object(retrieval, "_dblp_search", return_value=[]), \
+             tempfile.TemporaryDirectory() as raw:
+            papers, sources = retrieval._search_once("anomaly detection", Path(raw))
+        self.assertEqual(len(papers), 1)
+        self.assertEqual(sources, ["openalex"])
+
+
 class UtilTest(unittest.TestCase):
     def test_dedup_papers(self):
         papers = [_paper("A"), _paper("a"), _paper("B"), {"no_title": 1}]
         out = _dedup_papers(papers)
         self.assertEqual([p["title"] for p in out], ["A", "B"])
+
+    def test_dedup_papers_merges_cross_source_doi(self):
+        first = _paper("Original Title", "semantic_scholar")
+        first["doi"] = "10.1/shared"
+        second = _paper("Slightly Different Title", "openalex")
+        second["doi"] = "https://doi.org/10.1/shared"
+        second["abstract"] = "Detailed abstract"
+        out = _dedup_papers([first, second])
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0]["abstract"], "Detailed abstract")
+        self.assertEqual(out[0]["source_records"], ["semantic_scholar", "openalex"])
 
     def test_default_gap_note(self):
         self.assertTrue(_default_gap_note([], []))

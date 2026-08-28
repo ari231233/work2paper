@@ -71,6 +71,12 @@ export interface Paper {
   venue?: string;
   year?: number;
   source?: string;
+  source_records?: string[];
+  external_id?: string;
+  doi?: string;
+  url?: string;
+  relevance_level?: "high" | "partial";
+  match_reason?: string;
   understanding?: Understanding;
   evidence_card?: EvidenceCard;
 }
@@ -125,6 +131,10 @@ export interface LiteratureEntry {
   papers?: Paper[];
   gap_note?: string;
   sources?: string[];
+  target_count?: number;
+  high_count?: number;
+  partial_count?: number;
+  coverage_status?: "sufficient" | "insufficient";
   contradiction_graph?: ContradictionGraph;
   hypotheses?: Hypothesis[];
 }
