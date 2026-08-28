@@ -10,7 +10,7 @@
 
 > 🔒 **隐私承诺**：确定性分析在本地完成；接入 LLM 后，仅将**脱敏后的结构化事实**发送给你配置的 LLM 服务，不发送完整源码与原始数据；可切换本地模型实现完全离线。
 
-> 📐 架构（6-Agent 闭环 + 自进化层）见 [`docs/architecture.md`](docs/architecture.md)；工程规范见 [`docs/engineering.md`](docs/engineering.md)；多模块任务拆分见 [`docs/build-plan.md`](docs/build-plan.md)；踩坑与复盘见 [`docs/lessons-learned.md`](docs/lessons-learned.md)。
+> 📐 系统组成、分析流程与数据流向见 [`docs/architecture.md`](docs/architecture.md)；工程规范见 [`docs/engineering.md`](docs/engineering.md)；踩坑与复盘见 [`docs/lessons-learned.md`](docs/lessons-learned.md)。
 
 ## 核心链路
 
@@ -281,7 +281,7 @@ papermine/
   dossier.py       研究档案（单项目唯一事实源，版本化）
   llm.py           LLM 抽象（DeepSeek + NullProvider 降级）
   experience.py    经验库（自进化层：策略 / effect / 生命周期）
-  retrieval.py     文献检索（arXiv + Semantic Scholar）
+  retrieval.py     文献检索（arXiv / Semantic Scholar / OpenAlex / Crossref / DBLP）
   policy.py        策略注入（结构化 policy + LLM 解释）
   agents/          六个 Agent + ⑦ 经验沉淀
   storage.py       数据目录（~/.papermine）读写
